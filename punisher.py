@@ -223,16 +223,8 @@ app.add_handler(CommandHandler("warnings", list_warnings))
 app.add_handler(CommandHandler("muted", list_muted))
 app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
 
-# ===== KEEP ALIVE =====
-server = Flask('')
-
-@server.route('/')
-def home():
-    return "Bot is running"
-
-Thread(target=lambda: server.run(host="0.0.0.0", port=3000)).start()
-
 print("Punisher bot is running...")
 app.run_polling()
+
 
 
