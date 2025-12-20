@@ -125,25 +125,25 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("User is not muted")
 
     elif action == "unmute":
-    if user_id in muted_users:
-        del muted_users[user_id]
-        save_data(MUTED_FILE, muted_users)
-        try:
-            await context.bot.restrict_chat_member(
-                chat_id=update.effective_chat.id,
-                user_id=user_id,
-                permissions=ChatPermissions(
-                    can_send_messages=True,
-                    can_send_media_messages=True,
-                    can_send_other_messages=True,
-                    can_add_web_page_previews=True
+        if user_id in muted_users:
+            del muted_users[user_id]
+            save_data(MUTED_FILE, muted_users)
+            try:
+                await context.bot.restrict_chat_member(
+                    chat_id=update.effective_chat.id,
+                    user_id=user_id,
+                    permissions=ChatPermissions(
+                        can_send_messages=True,
+                        can_send_media_messages=True,
+                        can_send_other_messages=True,
+                        can_add_web_page_previews=True
+                    )
                 )
-            )
-        except:
-            pass
-        await query.edit_message_text(f"{get_user_mention(user_id,None)} unmuted")
-    else:
-        await query.edit_message_text("User is not muted")
+            except:
+                pass
+            await query.edit_message_text(f"{get_user_mention(user_id,None)} unmuted")
+        else:
+            await query.edit_message_text("User is not muted")
 
 # ===== HANDLE MESSAGES =====
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -273,6 +273,7 @@ app.add_handler(CommandHandler("myid", cmd_myid))
 
 print("Punisher bot is running...")
 app.run_polling()
+
 
 
 
