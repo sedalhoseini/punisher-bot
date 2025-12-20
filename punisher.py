@@ -7,6 +7,8 @@ from telegram.ext import (
     CommandHandler,
     ChatMemberHandler
 )
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import CallbackQueryHandler
 import time
 import unicodedata
 import os
@@ -78,6 +80,27 @@ def admin_only(func):
     return wrapper
 
 # ===== HELPERS =====
+
+def build_warning_keyboard(user_id):
+    """Create inline keyboard for warnings actions"""
+    buttons = [
+        [InlineKeyboardButton("Mute 10 min", callback_data=f"mute:{user_id}:600")],
+        [InlineKeyboardButton("Mute 30 min", callback_data=f"mute:{user_id}:1800")],
+        [InlineKeyboardButton("Clear warnings", callback_data=f"clearwarn:{user_id}")],
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+
+def build_muted_keyboard(user_id):
+    """Create inline keyboard for muted actions"""
+    buttons = [
+        [InlineKeyboardButton("Increase 10 min", callback_data=f"increase:{user_id}:600")],
+        [InlineKeyboardButton("Increase 30 min", callback_data=f"increase:{user_id}:1800")],
+        [InlineKeyboardButton("Unmute", callback_data=f"unmute:{user_id}")],
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+
 def get_user_mention(user_id, username):
     display = f"@{username}" if username else f"user_{user_id}"
     return f"[{display}](tg://user?id={user_id})"
@@ -122,6 +145,43 @@ user_warnings = load_data(WARNINGS_FILE, {})
 muted_users = load_data(MUTED_FILE, {})
 
 # ===== MESSAGE HANDLER =====
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data.split(":")
+    action = data[0]
+    user_id = int(data[1])
+    value = int(data[2]) if len(data) > 2 else None
+    
+    if action == "clearwarn":
+        user_warnings[user_id] = 0
+        save_data(WARNINGS_FILE, user_warnings)
+        await query.edit_message_text(f"Warnings cleared for user {user_id}")
+    
+    elif action == "mute":
+        until = int(time.time()) + value
+        muted_users[user_id] = until
+        save_data(MUTED_FILE, muted_users)
+        await query.edit_message_text(f"User {user_id} muted for {value//60} minutes")
+    
+    elif action == "increase":
+        if user_id in muted_users:
+            muted_users[user_id] += value
+            save_data(MUTED_FILE, muted_users)
+            await query.edit_message_text(f"Muted duration increased by {value//60} minutes for user {user_id}")
+        else:
+            await query.edit_message_text("User is not muted")
+    
+    elif action == "unmute":
+        if user_id in muted_users:
+            del muted_users[user_id]
+            save_data(MUTED_FILE, muted_users)
+            await query.edit_message_text(f"User {user_id} unmuted")
+        else:
+            await query.edit_message_text("User is not muted")
+
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.from_user:
@@ -270,46 +330,39 @@ async def handle_chat_member_update(update: Update, context: ContextTypes.DEFAUL
 # ===== COMMANDS =====
 @admin_only
 async def list_warnings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        if not user_warnings:
-            await update.message.reply_text("No warnings.")
-            return
+    if not user_warnings:
+        await update.message.reply_text("No warnings.")
+        return
+    
+    for uid, cnt in user_warnings.items():
+        try:
+            user = await context.bot.get_chat(uid)
+            mention = get_user_mention(user.id, user.username)
+        except:
+            mention = f"user_{uid}"
         
-        lines = []
-        for uid, cnt in user_warnings.items():
-            try:
-                user = await context.bot.get_chat(uid)
-                mention = get_user_mention(user.id, user.username)
-            except Exception:
-                mention = f"user_{uid}"
-            lines.append(f"{mention}: {cnt}")
-        
-        text = "\n".join(lines)
-        await update.message.reply_text(text)
-    except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+        await update.message.reply_text(
+            f"{mention}: {cnt}",
+            reply_markup=build_warning_keyboard(uid)
+        )
 
 @admin_only
 async def list_muted(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        if not muted_users:
-            await update.message.reply_text("No muted users.")
-            return
+    if not muted_users:
+        await update.message.reply_text("No muted users.")
+        return
+    
+    for uid, until_ts in muted_users.items():
+        try:
+            user = await context.bot.get_chat(uid)
+            mention = get_user_mention(user.id, user.username)
+        except:
+            mention = f"user_{uid}"
         
-        lines = []
-        for uid, until_ts in muted_users.items():
-            # Try to get username from chat, fallback to numeric ID
-            try:
-                user = await context.bot.get_chat(uid)
-                mention = get_user_mention(user.id, user.username)
-            except Exception:
-                mention = f"user_{uid}"
-            lines.append(f"{mention} until {time.ctime(until_ts)}")
-        
-        text = "\n".join(lines)
-        await update.message.reply_text(text)
-    except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+        await update.message.reply_text(
+            f"{mention} until {time.ctime(until_ts)}",
+            reply_markup=build_muted_keyboard(uid)
+        )
 
 async def cmd_start(update: Update, context):
     try:
@@ -333,10 +386,11 @@ app.add_handler(CommandHandler("myid", cmd_myid))
 app.add_handler(CommandHandler("warnings", list_warnings))
 app.add_handler(CommandHandler("muted", list_muted))
 app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
-
+app.add_handler(CallbackQueryHandler(button_handler))
 
 print("Punisher bot is running...")
 app.run_polling()
+
 
 
 
