@@ -10,14 +10,13 @@ from telegram.ext import (
 import time
 import unicodedata
 import os
-from flask import Flask
-from threading import Thread
+import json
 
 # ==================== PERSONALIZE THESE ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-ADMIN_USER_ID = 527164608
-WHITELIST_IDS = [527164608]
+ADMIN_USER_IDS = {527164608}  # Add your personal ID here
+ADMIN_CHAT_IDS = {1087968824}  # IDs of groups/channels the bot should recognize as admin
 
 MAX_MESSAGES_PER_MINUTE = 5
 WARNING_LIMIT = 3
@@ -66,10 +65,61 @@ user_message_times = {}
 user_warnings = {}
 muted_users = {}
 
+# ===== ADMIN CHECK DECORATOR =====
+def admin_only(func):
+    async def wrapper(update, context, *args, **kwargs):
+        if not is_admin(update):
+            try:
+                await update.message.reply_text("You are not allowed to use this command.")
+            except Exception:
+                pass
+            return
+        return await func(update, context, *args, **kwargs)
+    return wrapper
+
 # ===== HELPERS =====
 def get_user_mention(user_id, username):
     display = f"@{username}" if username else f"user_{user_id}"
     return f"[{display}](tg://user?id={user_id})"
+
+def is_admin(update: Update) -> bool:
+    msg = update.message
+    if not msg:
+        return False
+
+    # Case 1: personal account
+    if msg.from_user and msg.from_user.id in ADMIN_USER_IDS:
+        return True
+
+    # Case 2: message sent as group/channel
+    if msg.sender_chat and msg.sender_chat.id in ADMIN_CHAT_IDS:
+        return True
+
+    return False
+
+# ===== PERSISTENCE HELPERS =====
+WARNINGS_FILE = "warnings.json"
+MUTED_FILE = "muted.json"
+
+def load_data(file, default):
+    try:
+        with open(file, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return default
+    except Exception:
+        return default
+
+def save_data(file, data):
+    try:
+        with open(file, "w") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+# Load data at startup
+user_warnings = load_data(WARNINGS_FILE, {})
+muted_users = load_data(MUTED_FILE, {})
 
 # ===== MESSAGE HANDLER =====
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -78,21 +128,28 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_id = msg.from_user.id
+        # ===== FORWARD PRIVATE MESSAGES TO CHANNEL =====
+    if (
+        msg.chat.type == "private"
+        and msg.text
+        and not msg.text.startswith("/")
+        and not msg.reply_to_message
+    ):
+        try:
+            mention = get_user_mention(user_id, msg.from_user.username)
+            await context.bot.send_message(
+                chat_id=MESSAGES_CHANNEL_ID,
+                text=f'{mention}: "{msg.text}"',
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
 
-# ===== FORWARD PRIVATE MESSAGES TO CHANNEL =====
-if msg.chat.type == "private" and not msg.text.startswith("/") and not msg.reply_to_message:
-    try:
-        mention = get_user_mention(user_id, msg.from_user.username)
-        await context.bot.send_message(
-            chat_id=MESSAGES_CHANNEL_ID,
-            text=f"{mention}: \"{msg.text}\"",
-            parse_mode="Markdown"
-        )
-    except Exception:
-        pass
-    
-    if user_id in WHITELIST_IDS:
+
+
+    if is_admin(update):
         return
+
 
     # ===== DELETE JOIN / LEAVE MESSAGES =====
     if msg.new_chat_members or msg.left_chat_member:
@@ -147,24 +204,42 @@ async def warn_user(msg, context):
     uid = msg.from_user.id
     user_warnings[uid] = user_warnings.get(uid, 0) + 1
 
+    save_data(WARNINGS_FILE, user_warnings)
+    
     if user_warnings[uid] < WARNING_LIMIT:
-        await msg.reply_text(
-            f"Warning {user_warnings[uid]}/{WARNING_LIMIT}. Follow the rules."
-        )
+        try:
+            await msg.reply_text(
+                f"Warning {user_warnings[uid]}/{WARNING_LIMIT}. Follow the rules."
+            )
+        except Exception:
+            pass
     else:
         until = int(time.time()) + 600
         muted_users[uid] = until
-        await msg.chat.restrict_member(
-            user_id=uid,
-            permissions=ChatPermissions(can_send_messages=False),
-            until_date=until
-        )
-        await log_action(
-            f"User `{uid}` muted for repeated violations.",
-            SPAM_CHANNEL_ID,
-            context
-        )
+        
+        save_data(MUTED_FILE, muted_users)
+        
+        try:
+            await msg.chat.restrict_member(
+                user_id=uid,
+                permissions=ChatPermissions(can_send_messages=False),
+                until_date=until
+            )
+        except Exception:
+            pass
+
+        try:
+            mention = get_user_mention(uid, msg.from_user.username)
+            await log_action(
+                f"User `{uid}` muted for repeated violations.",
+                SPAM_CHANNEL_ID,
+                context
+            )
+        except Exception:
+            pass
+
         user_warnings[uid] = 0
+        save_data(WARNINGS_FILE, user_warnings)  # reset warning count
 
 # ===== LOGGING =====
 async def log_action(text, channel_id, context):
@@ -193,25 +268,40 @@ async def handle_chat_member_update(update: Update, context: ContextTypes.DEFAUL
         )
 
 # ===== COMMANDS =====
+@admin_only
 async def list_warnings(update: Update, context):
-    if not user_warnings:
-        await update.message.reply_text("No warnings.")
-        return
-    text = "\n".join([f"{uid}: {cnt}" for uid, cnt in user_warnings.items()])
-    await update.message.reply_text(text)
+    try:
+        if not user_warnings:
+            await update.message.reply_text("No warnings.")
+            return
+        text = "\n".join([f"{uid}: {cnt}" for uid, cnt in user_warnings.items()])
+        await update.message.reply_text(text)
+    except Exception:
+        pass
 
+@admin_only
 async def list_muted(update: Update, context):
-    if not muted_users:
-        await update.message.reply_text("No muted users.")
-        return
-    text = "\n".join([f"{uid} until {time.ctime(t)}" for uid, t in muted_users.items()])
-    await update.message.reply_text(text)
+    try:
+        if not muted_users:
+            await update.message.reply_text("No muted users.")
+            return
+        text = "\n".join([f"{uid} until {time.ctime(t)}" for uid, t in muted_users.items()])
+        await update.message.reply_text(text)
+    except Exception:
+        pass
 
 async def cmd_start(update: Update, context):
-    await update.message.reply_text("درود به چنل خودتون خوش اومدین")
+    try:
+        await update.message.reply_text("درود به چنل خودتون خوش اومدین")
+    except Exception:
+        pass
 
 async def cmd_myid(update: Update, context):
-    await update.message.reply_text("@SedAl_Hoseini")
+    try:
+        await update.message.reply_text("@SedAl_Hoseini")
+    except Exception:
+        pass
+
 
 # ===== APP =====
 app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -223,8 +313,6 @@ app.add_handler(CommandHandler("warnings", list_warnings))
 app.add_handler(CommandHandler("muted", list_muted))
 app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
 
+
 print("Punisher bot is running...")
 app.run_polling()
-
-
-
