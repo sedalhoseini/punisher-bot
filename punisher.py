@@ -87,6 +87,10 @@ def admin_only(func):
 
 # ===== HELPERS =====
 
+def format_tehran_time(unix_ts):
+    tehran_ts = unix_ts + (3 * 3600) + (30 * 60)
+    return time.strftime("%Y-%m-%d  %H:%M", time.localtime(tehran_ts))
+
 def build_warning_keyboard(user_id):
     """Create inline keyboard for warnings actions"""
     buttons = [
@@ -398,7 +402,7 @@ async def list_muted(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             mention = f"user_{uid}"
         await update.message.reply_text(
-            f"{mention} until {time.ctime(until_ts)}",
+           f"{mention} until {format_tehran_time(until_ts)}",
             reply_markup=build_muted_keyboard(uid)
         )
 
@@ -428,6 +432,7 @@ app.add_handler(CallbackQueryHandler(button_handler))
 
 print("Punisher bot is running...")
 app.run_polling()
+
 
 
 
