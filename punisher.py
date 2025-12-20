@@ -156,53 +156,47 @@ muted_users = load_data(MUTED_FILE, {})
 
 # ===== MESSAGE HANDLER =====
 
+from datetime import datetime, timedelta, timezone
+
+# Tehran timezone
+TEHRAN = timezone(timedelta(hours=3, minutes=30))
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
+
     data = query.data.split(":")
     action = data[0]
     user_id = int(data[1])
     value = int(data[2]) if len(data) > 2 else None
-    
+
     if action == "clearwarn":
-        user_warnings[user_id] = 0
+        now = int(time.time())
+        # Reset warning with proper structure
+        user_warnings[user_id] = {"count": 0, "time": now}
         save_data(WARNINGS_FILE, user_warnings)
-        await query.edit_message_text(f"Warnings cleared for user {user_id}")
-    
+        await query.edit_message_text(f"Warnings cleared for {get_user_mention(user_id, None)}")
+
     elif action == "mute":
         until = int(time.time()) + value
         muted_users[user_id] = until
         save_data(MUTED_FILE, muted_users)
+        await query.edit_message_text(f"{get_user_mention(user_id, None)} muted for {value//60} minutes")
 
-        await context.bot.restrict_chat_member(
-            chat_id=query.message.chat.id,
-            user_id=user_id,
-            permissions=ChatPermissions(can_send_messages=False),
-            until_date=until
-        )
-
-        await query.edit_message_text(
-            f"User muted until {format_tehran_time(until)}",
-            reply_markup=build_muted_keyboard(user_id)
-        )
-
-        save_data(MUTED_FILE, muted_users)
-        await query.edit_message_text(f"User {user_id} muted for {value//60} minutes")
-    
     elif action == "increase":
         if user_id in muted_users:
             muted_users[user_id] += value
             save_data(MUTED_FILE, muted_users)
-            await query.edit_message_text(f"Muted duration increased by {value//60} minutes for user {user_id}")
+            new_until = datetime.fromtimestamp(muted_users[user_id], tz=TEHRAN).strftime("%Y-%m-%d %H:%M:%S")
+            await query.edit_message_text(f"Muted duration increased by {value//60} minutes for {get_user_mention(user_id, None)}. New until: {new_until}")
         else:
             await query.edit_message_text("User is not muted")
-    
+
     elif action == "unmute":
         if user_id in muted_users:
             del muted_users[user_id]
             save_data(MUTED_FILE, muted_users)
-            await query.edit_message_text(f"User {user_id} unmuted")
+            await query.edit_message_text(f"{get_user_mention(user_id, None)} unmuted")
         else:
             await query.edit_message_text("User is not muted")
 
@@ -361,27 +355,22 @@ async def handle_chat_member_update(update: Update, context: ContextTypes.DEFAUL
 async def list_warnings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = int(time.time())
     EXPIRE_SECONDS = 24*3600  # 24 hours expiry
-    
+
     # Remove expired warnings
     expired = [uid for uid, data in user_warnings.items() if now - data['time'] > EXPIRE_SECONDS]
     for uid in expired:
         del user_warnings[uid]
     if expired:
         save_data(WARNINGS_FILE, user_warnings)
-    
+
     if not user_warnings:
         await update.message.reply_text("No warnings.")
         return
-    
+
     for uid, data in user_warnings.items():
-        try:
-            user = await context.bot.get_chat(uid)
-            mention = get_user_mention(user.id, user.username)
-        except:
-            mention = f"user_{uid}"
-        
+        mention = get_user_mention(uid, None)
         await update.message.reply_text(
-            f"{mention}: {data['count']}",
+            f"{mention}: {data.get('count', 0)}",
             reply_markup=build_warning_keyboard(uid)
         )
 
@@ -394,10 +383,9 @@ async def list_muted(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             chat_member = await context.bot.get_chat_member(update.effective_chat.id, uid)
             # If user is not restricted or restriction expired, remove from memory
-            if until_ts <= now:
+            if chat_member.can_send_messages or until_ts <= now:
                 to_remove.append(uid)
         except Exception:
-            # If we can't fetch member (left the chat), remove too
             to_remove.append(uid)
 
     for uid in to_remove:
@@ -410,13 +398,10 @@ async def list_muted(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     for uid, until_ts in muted_users.items():
-        try:
-            user = await context.bot.get_chat(uid)
-            mention = get_user_mention(user.id, user.username)
-        except:
-            mention = f"user_{uid}"
+        mention = get_user_mention(uid, None)
+        until_str = datetime.fromtimestamp(until_ts, tz=TEHRAN).strftime("%Y-%m-%d %H:%M:%S")
         await update.message.reply_text(
-           f"{mention} until {format_tehran_time(until_ts)}",
+            f"{mention} until {until_str}",
             reply_markup=build_muted_keyboard(uid)
         )
 
@@ -446,6 +431,7 @@ app.add_handler(CallbackQueryHandler(button_handler))
 
 print("Punisher bot is running...")
 app.run_polling()
+
 
 
 
