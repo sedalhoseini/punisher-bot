@@ -269,26 +269,47 @@ async def handle_chat_member_update(update: Update, context: ContextTypes.DEFAUL
 
 # ===== COMMANDS =====
 @admin_only
-async def list_warnings(update: Update, context):
+async def list_warnings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if not user_warnings:
             await update.message.reply_text("No warnings.")
             return
-        text = "\n".join([f"{uid}: {cnt}" for uid, cnt in user_warnings.items()])
+        
+        lines = []
+        for uid, cnt in user_warnings.items():
+            try:
+                user = await context.bot.get_chat(uid)
+                mention = get_user_mention(user.id, user.username)
+            except Exception:
+                mention = f"user_{uid}"
+            lines.append(f"{mention}: {cnt}")
+        
+        text = "\n".join(lines)
         await update.message.reply_text(text)
-    except Exception:
-        pass
+    except Exception as e:
+        await update.message.reply_text(f"Error: {e}")
 
 @admin_only
-async def list_muted(update: Update, context):
+async def list_muted(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if not muted_users:
             await update.message.reply_text("No muted users.")
             return
-        text = "\n".join([f"{uid} until {time.ctime(t)}" for uid, t in muted_users.items()])
+        
+        lines = []
+        for uid, until_ts in muted_users.items():
+            # Try to get username from chat, fallback to numeric ID
+            try:
+                user = await context.bot.get_chat(uid)
+                mention = get_user_mention(user.id, user.username)
+            except Exception:
+                mention = f"user_{uid}"
+            lines.append(f"{mention} until {time.ctime(until_ts)}")
+        
+        text = "\n".join(lines)
         await update.message.reply_text(text)
-    except Exception:
-        pass
+    except Exception as e:
+        await update.message.reply_text(f"Error: {e}")
 
 async def cmd_start(update: Update, context):
     try:
@@ -316,5 +337,6 @@ app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
 
 print("Punisher bot is running...")
 app.run_polling()
+
 
 
