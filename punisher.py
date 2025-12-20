@@ -364,25 +364,33 @@ async def list_warnings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def list_muted(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = int(time.time())
-    
-    # Remove expired mutes
-    expired = [uid for uid, until in muted_users.items() if until <= now]
-    for uid in expired:
+    to_remove = []
+
+    for uid, until_ts in muted_users.items():
+        try:
+            chat_member = await context.bot.get_chat_member(update.effective_chat.id, uid)
+            # If user is not restricted or restriction expired, remove from memory
+            if chat_member.can_send_messages or until_ts <= now:
+                to_remove.append(uid)
+        except Exception:
+            # If we can't fetch member (left the chat), remove too
+            to_remove.append(uid)
+
+    for uid in to_remove:
         del muted_users[uid]
-    if expired:
+    if to_remove:
         save_data(MUTED_FILE, muted_users)
-    
+
     if not muted_users:
         await update.message.reply_text("No muted users.")
         return
-    
+
     for uid, until_ts in muted_users.items():
         try:
             user = await context.bot.get_chat(uid)
             mention = get_user_mention(user.id, user.username)
         except:
             mention = f"user_{uid}"
-        
         await update.message.reply_text(
             f"{mention} until {time.ctime(until_ts)}",
             reply_markup=build_muted_keyboard(uid)
@@ -414,6 +422,7 @@ app.add_handler(CallbackQueryHandler(button_handler))
 
 print("Punisher bot is running...")
 app.run_polling()
+
 
 
 
