@@ -191,6 +191,22 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await log_action(f"Flood detected from {mention} (ID: `{uid}`)", SPAM_CHANNEL_ID, context)
         await warn_user(msg, context)
 
+    if len(times) > MAX_MESSAGES_PER_MINUTE:
+        try: await msg.delete()
+        except: pass
+        mention = get_user_mention(uid, msg.from_user.username)
+        await log_action(f"Flood detected from {mention} (ID: `{uid}`)", SPAM_CHANNEL_ID, context)
+        await warn_user(msg, context)
+
+
+    # ===== REPLY WITH NUMERIC ID =====
+    # Only for non-command text messages in groups/channels
+    if msg.chat.type in ("group","supergroup") and msg.text and not msg.text.startswith("/"):
+        try:
+            await msg.reply_text(f"`[{uid}]`", parse_mode="Markdown")
+        except:
+            pass
+
 # ===== WARN & MUTE =====
 async def warn_user(msg, context):
     uid = msg.from_user.id
@@ -273,6 +289,7 @@ app.add_handler(CommandHandler("myid", cmd_myid))
 
 print("Punisher bot is running...")
 app.run_polling()
+
 
 
 
