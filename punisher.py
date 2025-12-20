@@ -11,6 +11,7 @@ from telegram.ext import (
 import time, os, json
 from datetime import datetime
 import pytz
+import unicodedata
 
 # ========== CONFIG ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -24,7 +25,9 @@ LOG_CHANNEL_ID = -1003672042124
 SPAM_CHANNEL_ID = -1003614311942
 MESSAGES_CHANNEL_ID = -1003299270448
 
-FILTER_WORDS = ["spam","advertisement","ad","promo","buy now","free","click here"]  # add more words
+FILTER_WORDS = [
+    "spam","advertisement","ad","promo","buy now","free","click here"
+]  # add your full list if needed
 
 WARNINGS_FILE = "warnings.json"
 MUTED_FILE = "muted.json"
@@ -38,11 +41,18 @@ muted_users = {}
 # ===== HELPERS =====
 def admin_only(func):
     async def wrapper(update, context, *args, **kwargs):
-        msg = update.message
-        if not msg: return
-        if (msg.from_user and msg.from_user.id in ADMIN_USER_IDS) or (msg.sender_chat and msg.sender_chat.id in ADMIN_CHAT_IDS):
-            return await func(update, context, *args, **kwargs)
-        await update.message.reply_text("You are not allowed to use this command.")
+        user = None
+        if update.message:
+            user = update.message.from_user
+        elif update.callback_query:
+            user = update.callback_query.from_user
+        if not user or (user.id not in ADMIN_USER_IDS and (update.message and not update.message.sender_chat or update.callback_query and not update.callback_query.message.sender_chat)):
+            if update.message:
+                await update.message.reply_text("You are not allowed to use this command.")
+            elif update.callback_query:
+                await update.callback_query.answer("Not allowed", show_alert=True)
+            return
+        return await func(update, context, *args, **kwargs)
     return wrapper
 
 def get_user_mention(user_id, username):
@@ -78,6 +88,12 @@ def save_data(file, data):
 # ===== LOAD DATA =====
 user_warnings = load_data(WARNINGS_FILE, {})
 muted_users = load_data(MUTED_FILE, {})
+
+# ===== LOGGING =====
+async def log_action(text, channel_id, context):
+    try:
+        await context.bot.send_message(chat_id=channel_id, text=text, parse_mode="Markdown")
+    except: pass
 
 # ===== BUTTON HANDLER =====
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -123,14 +139,23 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = msg.from_user.id
     now = int(time.time())
 
+    # ===== FORWARD PRIVATE MESSAGES =====
+    if msg.chat.type=="private" and msg.text and not msg.text.startswith("/") and not msg.reply_to_message:
+        try:
+            mention = get_user_mention(uid, msg.from_user.username)
+            await context.bot.send_message(MESSAGES_CHANNEL_ID, f'{mention}: "{msg.text}"', parse_mode="Markdown")
+        except: pass
+
     # spam filter
     if msg.chat.type in ("group","supergroup") and msg.text:
-        text = msg.text.lower()
+        normalized = unicodedata.normalize("NFC", msg.text.lower())
         for word in FILTER_WORDS:
-            if word in text:
+            if word in normalized:
                 try: await msg.delete()
                 except: pass
-                await warn_user(msg,context)
+                mention = get_user_mention(uid, msg.from_user.username)
+                await log_action(f"Deleted spam from {mention} (ID: `{uid}`):\n{msg.text}", SPAM_CHANNEL_ID, context)
+                await warn_user(msg, context)
                 return
 
     # flood control
@@ -141,7 +166,9 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(times) > MAX_MESSAGES_PER_MINUTE:
         try: await msg.delete()
         except: pass
-        await warn_user(msg,context)
+        mention = get_user_mention(uid, msg.from_user.username)
+        await log_action(f"Flood detected from {mention} (ID: `{uid}`)", SPAM_CHANNEL_ID, context)
+        await warn_user(msg, context)
 
 # ===== WARN & MUTE =====
 async def warn_user(msg, context):
@@ -154,45 +181,45 @@ async def warn_user(msg, context):
         save_data(MUTED_FILE,muted_users)
         try: await msg.chat.restrict_member(uid,permissions=ChatPermissions(can_send_messages=False),until_date=now+600)
         except: pass
+        mention = get_user_mention(uid, msg.from_user.username)
+        await log_action(f"User `{uid}` muted for repeated violations.", SPAM_CHANNEL_ID, context)
         user_warnings[uid] = {"count":0,"time":now}
         save_data(WARNINGS_FILE,user_warnings)
 
+# ===== CHAT MEMBER HANDLER =====
+async def handle_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cm = update.chat_member
+    if not cm or cm.chat.type != "channel": return
+    if cm.old_chat_member.status in ("left","kicked") and cm.new_chat_member.status=="member":
+        user = cm.new_chat_member.user
+        mention = get_user_mention(user.id,user.username)
+        await log_action(f"New channel subscriber: {mention} | ID: `{user.id}`", LOG_CHANNEL_ID, context)
+
 # ===== COMMANDS =====
-@admin_only
 @admin_only
 async def list_warnings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = int(time.time())
-    EXPIRE_SECONDS = 24*3600  # 24 hours expiry
-    
-    # Remove expired warnings or 0-count warnings
-    expired = [uid for uid, data in user_warnings.items() if now - data['time'] > EXPIRE_SECONDS or data['count'] == 0]
-    for uid in expired:
-        del user_warnings[uid]
-    if expired:
-        save_data(WARNINGS_FILE, user_warnings)
-    
+    EXPIRE_SECONDS = 24*3600
+    expired = [uid for uid, data in user_warnings.items() if now - data['time'] > EXPIRE_SECONDS or data['count']==0]
+    for uid in expired: del user_warnings[uid]
+    if expired: save_data(WARNINGS_FILE, user_warnings)
     if not user_warnings:
         await update.message.reply_text("No warnings.")
         return
-    
     for uid, data in user_warnings.items():
         try:
             user = await context.bot.get_chat(uid)
             mention = get_user_mention(user.id, user.username)
         except:
             mention = f"user_{uid}"
-        
-        await update.message.reply_text(
-            f"{mention}: {data['count']}",
-            reply_markup=build_warning_keyboard(uid)
-        )
+        await update.message.reply_text(f"{mention}: {data['count']}", reply_markup=build_warning_keyboard(uid))
 
 @admin_only
 async def list_muted(update: Update, context):
     now = int(time.time())
     expired = [uid for uid,until in muted_users.items() if until <= now]
     for uid in expired: del muted_users[uid]
-    save_data(MUTED_FILE,muted_users)
+    if expired: save_data(MUTED_FILE, muted_users)
     if not muted_users:
         await update.message.reply_text("No muted users.")
         return
@@ -202,6 +229,7 @@ async def list_muted(update: Update, context):
 
 # ===== APP =====
 app = ApplicationBuilder().token(BOT_TOKEN).build()
+app.add_handler(ChatMemberHandler(handle_chat_member_update, ChatMemberHandler.CHAT_MEMBER))
 app.add_handler(CommandHandler("warnings", list_warnings))
 app.add_handler(CommandHandler("muted", list_muted))
 app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
@@ -209,4 +237,3 @@ app.add_handler(CallbackQueryHandler(button_handler))
 
 print("Punisher bot is running...")
 app.run_polling()
-
