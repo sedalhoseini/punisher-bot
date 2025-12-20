@@ -70,12 +70,18 @@ muted_users = {}
 # ===== ADMIN CHECK DECORATOR =====
 def admin_only(func):
     async def wrapper(update, context, *args, **kwargs):
-        if not is_admin(update):
-            try:
-                await update.message.reply_text("You are not allowed to use this command.")
-            except Exception:
-                pass
+        user = None
+
+        if update.message:
+            user = update.message.from_user
+        elif update.callback_query:
+            user = update.callback_query.from_user
+
+        if not user or user.id not in ADMIN_USER_IDS:
+            if update.callback_query:
+                await update.callback_query.answer("Not allowed", show_alert=True)
             return
+
         return await func(update, context, *args, **kwargs)
     return wrapper
 
@@ -422,6 +428,7 @@ app.add_handler(CallbackQueryHandler(button_handler))
 
 print("Punisher bot is running...")
 app.run_polling()
+
 
 
 
