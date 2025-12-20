@@ -159,16 +159,33 @@ async def warn_user(msg, context):
 
 # ===== COMMANDS =====
 @admin_only
-async def list_warnings(update: Update, context):
+@admin_only
+async def list_warnings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = int(time.time())
-    expired = [uid for uid,data in user_warnings.items() if now - data["time"]>24*3600]
-    for uid in expired: del user_warnings[uid]
-    save_data(WARNINGS_FILE,user_warnings)
+    EXPIRE_SECONDS = 24*3600  # 24 hours expiry
+    
+    # Remove expired warnings or 0-count warnings
+    expired = [uid for uid, data in user_warnings.items() if now - data['time'] > EXPIRE_SECONDS or data['count'] == 0]
+    for uid in expired:
+        del user_warnings[uid]
+    if expired:
+        save_data(WARNINGS_FILE, user_warnings)
+    
     if not user_warnings:
         await update.message.reply_text("No warnings.")
         return
-    for uid,data in user_warnings.items():
-        await update.message.reply_text(f"{get_user_mention(uid,None)}: {data['count']}", reply_markup=build_warning_keyboard(uid))
+    
+    for uid, data in user_warnings.items():
+        try:
+            user = await context.bot.get_chat(uid)
+            mention = get_user_mention(user.id, user.username)
+        except:
+            mention = f"user_{uid}"
+        
+        await update.message.reply_text(
+            f"{mention}: {data['count']}",
+            reply_markup=build_warning_keyboard(uid)
+        )
 
 @admin_only
 async def list_muted(update: Update, context):
@@ -192,3 +209,4 @@ app.add_handler(CallbackQueryHandler(button_handler))
 
 print("Punisher bot is running...")
 app.run_polling()
+
