@@ -37,6 +37,7 @@ TEHRAN = pytz.timezone("Asia/Tehran")
 user_message_times = {}
 user_warnings = {}
 muted_users = {}
+WAITING_FOR_NUMERIC = set()
 
 # ===== HELPERS =====
 def admin_only(func):
@@ -55,9 +56,10 @@ def admin_only(func):
         return await func(update, context, *args, **kwargs)
     return wrapper
 
-def get_user_mention(user_id, username):
-    display = f"@{username}" if username else f"user_{user_id}"
-    return f"[{display}](tg://user?id={user_id})"
+# CLICKABLE USER (HTML)
+def user_link(user):
+    name = user.full_name or "User"
+    return f'<a href="tg://user?id={user.id}">{name}</a>'
 
 def build_warning_keyboard(user_id):
     buttons = [
@@ -92,8 +94,24 @@ muted_users = load_data(MUTED_FILE, {})
 # ===== LOGGING =====
 async def log_action(text, channel_id, context):
     try:
-        await context.bot.send_message(chat_id=channel_id, text=text, parse_mode="Markdown")
-    except: pass
+        await context.bot.send_message(
+            chat_id=channel_id,
+            text=text,
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+    except:
+        pass
+
+# ===== ID REPLY HELPER =====
+async def reply_with_id(update, target_id):
+    try:
+        await update.message.reply_text(
+            f"`{target_id}`",
+            parse_mode="Markdown"
+        )
+    except:
+        pass
 
 # ===== BUTTON HANDLER =====
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -148,7 +166,49 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ===== HANDLE MESSAGES =====
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
+
+        # --- GET NUMERIC MODE (@username / channel) ---
+    if msg and msg.text and msg.text.startswith("@"):
+        try:
+            chat = await context.bot.get_chat(msg.text)
+            await msg.reply_text(f"`{chat.id}`", parse_mode="Markdown")
+            return
+        except:
+            pass
+
+    # --- FORWARDED CHANNEL ---
+    if msg.forward_from_chat:
+        await reply_with_id(update, msg.forward_from_chat.id)
+        return
+
+    # --- NORMAL USER MESSAGE ---
+    if msg.from_user:
+        await reply_with_id(update, msg.from_user.id)
+
     if not msg or not msg.from_user: return
+    
+    # --- NUMERIC MODE ACTIVE ---
+    if user_id in WAITING_FOR_NUMERIC:
+        try:
+            # @username or channel
+            if msg.text and msg.text.startswith("@"):
+                chat = await context.bot.get_chat(msg.text)
+                await reply_with_id(update, chat.id)
+
+            # forwarded channel
+            elif msg.forward_from_chat:
+                await reply_with_id(update, msg.forward_from_chat.id)
+
+            # normal user
+            elif msg.from_user:
+                await reply_with_id(update, msg.from_user.id)
+
+        except:
+            pass
+
+        WAITING_FOR_NUMERIC.discard(user_id)
+        return
+
     uid = msg.from_user.id
     now = int(time.time())
        
@@ -156,6 +216,13 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg.chat.type == "private" and msg.from_user:
         try:
             mention = get_user_mention(msg.from_user.id, msg.from_user.username)
+
+            # --- NUMERIC ID MODE (media/sticker) ---
+            if numeric_mode.get(msg.from_user.id):   # if user requested numeric ID
+                if msg.sticker or msg.photo or msg.video or msg.audio or msg.voice:
+                    await msg.reply_text(f"`{msg.from_user.id}`", parse_mode="Markdown")
+                    numeric_mode.pop(msg.from_user.id, None)  # exit numeric mode
+                    return  # do NOT forward or log
 
             if msg.text and not msg.text.startswith("/"):
                 await context.bot.send_message(MESSAGES_CHANNEL_ID, f'{mention}: "{msg.text}"', parse_mode="Markdown")
@@ -171,6 +238,12 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_voice(MESSAGES_CHANNEL_ID, msg.voice.file_id, caption=f"{mention}")
             elif msg.sticker:
                 await context.bot.send_sticker(MESSAGES_CHANNEL_ID, msg.sticker.file_id)
+                await context.bot.send_message(
+                    MESSAGES_CHANNEL_ID,
+                    user_link(msg.from_user),
+                    parse_mode="HTML"
+                )
+
 
         except Exception as e:
             print(f"Forwarding error: {e}")
@@ -198,8 +271,8 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if word in normalized:
                 try: await msg.delete()
                 except: pass
-                mention = get_user_mention(uid, msg.from_user.username)
-                await log_action(f"Deleted spam from {mention} (ID: `{uid}`):\n{msg.text}", SPAM_CHANNEL_ID, context)
+                mention = user_link(user)
+                await log_action(f"{mention}, Spam deleted.", SPAM_CHANNEL_ID, context)
                 await warn_user(msg, context)
                 return
 
@@ -211,15 +284,15 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(times) > MAX_MESSAGES_PER_MINUTE:
         try: await msg.delete()
         except: pass
-        mention = get_user_mention(uid, msg.from_user.username)
-        await log_action(f"Flood detected from {mention} (ID: `{uid}`)", SPAM_CHANNEL_ID, context)
+        mention = user_link(msg.from_user)
+        await log_action(f"{mention}, Flood detected.", SPAM_CHANNEL_ID, context)
         await warn_user(msg, context)
 
     if len(times) > MAX_MESSAGES_PER_MINUTE:
         try: await msg.delete()
         except: pass
-        mention = get_user_mention(uid, msg.from_user.username)
-        await log_action(f"Flood detected from {mention} (ID: `{uid}`)", SPAM_CHANNEL_ID, context)
+        mention = user_link(msg.from_user)
+        await log_action(f"{mention}, Flood detected.", SPAM_CHANNEL_ID, context)
         await warn_user(msg, context)
     
     # NUMERIC ID REPLY
@@ -248,8 +321,8 @@ async def warn_user(msg, context):
         save_data(MUTED_FILE,muted_users)
         try: await msg.chat.restrict_member(uid,permissions=ChatPermissions(can_send_messages=False),until_date=now+600)
         except: pass
-        mention = get_user_mention(uid, msg.from_user.username)
-        await log_action(f"User `{uid}` muted for repeated violations.", SPAM_CHANNEL_ID, context)
+        mention = user_link(msg.from_user)
+        await log_action(f"{mention}, Got muted.", SPAM_CHANNEL_ID, context)
         user_warnings[uid] = {"count":0,"time":now}
         save_data(WARNINGS_FILE,user_warnings)
 
@@ -259,8 +332,8 @@ async def handle_chat_member_update(update: Update, context: ContextTypes.DEFAUL
     if not cm or cm.chat.type != "channel": return
     if cm.old_chat_member.status in ("left","kicked") and cm.new_chat_member.status=="member":
         user = cm.new_chat_member.user
-        mention = get_user_mention(user.id,user.username)
-        await log_action(f"New channel subscriber: {mention} | ID: `{user.id}`", LOG_CHANNEL_ID, context)
+        mention = user_link(user)
+        await log_action(f"{mention}, Joined.", LOG_CHANNEL_ID, context)
 
 # ===== COMMANDS =====
 @admin_only
@@ -307,6 +380,23 @@ async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
 
+# ===== GET NUMERIC COMMAND =====
+async def get_numeric(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id = update.effective_user.id
+        WAITING_FOR_NUMERIC.add(user_id)
+
+        await update.message.reply_text(
+            "لطفا یکی از موارد زیر را ارسال کنید:\n"
+            "@username\n"
+            "یا یک پیام فوروارد شده از کانال\n"
+            "یا یک پیام معمولی\n"
+            "یا استیکر / مدیا"
+        )
+    except:
+        pass
+
+
 # ===== APP =====
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 app.add_handler(ChatMemberHandler(handle_chat_member_update, ChatMemberHandler.CHAT_MEMBER))
@@ -316,9 +406,11 @@ app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
 app.add_handler(CallbackQueryHandler(button_handler))
 app.add_handler(CommandHandler("start", cmd_start))
 app.add_handler(CommandHandler("myid", cmd_myid))
+app.add_handler(CommandHandler("get_numeric", get_numeric))
 
 print("Punisher bot is running...")
 app.run_polling()
+
 
 
 
