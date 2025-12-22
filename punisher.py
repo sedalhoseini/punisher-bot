@@ -112,22 +112,21 @@ async def log_action(text, channel_id, context):
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
     data = query.data.split(":")
     action = data[0]
     user_id = int(data[1])
-    value = int(data[2]) if len(data)>2 else None
+    value = int(data[2]) if len(data) > 2 else None
     now = int(time.time())
 
+    chat_id = query.message.chat.id  # ALWAYS get chat_id from query.message
+
     if action == "clearwarn":
-        user_warnings[user_id] = {"count":0,"time":now}
-        save_data(WARNINGS_FILE,user_warnings)
+        user_warnings[user_id] = {"count": 0, "time": now}
+        save_data(WARNINGS_FILE, user_warnings)
         await query.edit_message_text(f"Warnings cleared for {get_user_mention(user_id,None)}")
 
     elif action == "mute":
-        chat_id = update.effective_chat.id
-        if not chat_id:
-            await query.answer("Cannot find chat ID", show_alert=True)
-            return
         muted_users[user_id] = now + value
         save_data(MUTED_FILE, muted_users)
         try:
@@ -148,10 +147,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"{get_user_mention(user_id,None)} muted for {value//60} minutes")
 
     elif action == "unmute":
-        chat_id = update.effective_chat.id
-        if not chat_id:
-            await query.answer("Cannot find chat ID", show_alert=True)
-            return
         if user_id in muted_users:
             del muted_users[user_id]
             save_data(MUTED_FILE, muted_users)
@@ -164,7 +159,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         can_send_media_messages=True,
                         can_send_other_messages=True,
                         can_add_web_page_previews=True
-                    )
+                    ),
+                    until_date=None  # explicit
                 )
                 print(f"[DEBUG] Button-unmute applied to user {user_id} in chat {chat_id}")
             except Exception as e:
@@ -177,23 +173,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id in muted_users:
             muted_users[user_id] += value
             save_data(MUTED_FILE, muted_users)
-            chat_id = query.message.chat.id if update.effective_chat else None
             until_str = datetime.fromtimestamp(muted_users[user_id], tz=TEHRAN).strftime("%Y-%m-%d %H:%M:%S")
-            if chat_id:
-                try:
-                    await context.bot.restrict_chat_member(
-                        chat_id=chat_id,
-                        user_id=user_id,
-                        permissions=ChatPermissions(
-                            can_send_messages=False,
-                            can_send_media_messages=False,
-                            can_send_other_messages=False,
-                            can_add_web_page_previews=False
-                        ),
-                        until_date=muted_users[user_id]
-                    )
-                except Exception as e:
-                    print(f"Button increase failed: {e}")
+            try:
+                await context.bot.restrict_chat_member(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    permissions=ChatPermissions(
+                        can_send_messages=False,
+                        can_send_media_messages=False,
+                        can_send_other_messages=False,
+                        can_add_web_page_previews=False
+                    ),
+                    until_date=muted_users[user_id]
+                )
+            except Exception as e:
+                print(f"[ERROR] Button increase failed: {e}")
             await query.edit_message_text(f"Muted duration increased for {get_user_mention(user_id,None)}. New until: {until_str}")
         else:
             await query.edit_message_text("User is not muted")
@@ -272,6 +266,10 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def warn_user(msg, context):
     uid = msg.from_user.id
     now = int(time.time())
+
+    # Reload warnings to avoid stale data overwriting a reset
+    global user_warnings
+    user_warnings = load_data(WARNINGS_FILE, {})
 
     # Increment warnings
     user_warnings[uid] = {"count": user_warnings.get(uid, {"count": 0})["count"] + 1, "time": now}
@@ -413,6 +411,7 @@ app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
 
 print("Punisher bot is running...")
 app.run_polling()
+
 
 
 
