@@ -124,26 +124,54 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"Warnings cleared for {get_user_mention(user_id,None)}")
 
     elif action == "mute":
+        chat_id = update.effective_chat.id
+        if not chat_id:
+            await query.answer("Cannot find chat ID", show_alert=True)
+            return
         muted_users[user_id] = now + value
         save_data(MUTED_FILE, muted_users)
-        chat_id = query.message.chat.id if update.effective_chat else None
-        if chat_id:
+        try:
+            await context.bot.restrict_chat_member(
+                chat_id=chat_id,
+                user_id=user_id,
+                permissions=ChatPermissions(
+                    can_send_messages=False,
+                    can_send_media_messages=False,
+                    can_send_other_messages=False,
+                    can_add_web_page_previews=False
+                ),
+                until_date=now + value
+            )
+            print(f"[DEBUG] Button-mute applied to user {user_id} in chat {chat_id}")
+        except Exception as e:
+            print(f"[ERROR] Button mute failed for user {user_id}: {e}")
+        await query.edit_message_text(f"{get_user_mention(user_id,None)} muted for {value//60} minutes")
+
+    elif action == "unmute":
+        chat_id = update.effective_chat.id
+        if not chat_id:
+            await query.answer("Cannot find chat ID", show_alert=True)
+            return
+        if user_id in muted_users:
+            del muted_users[user_id]
+            save_data(MUTED_FILE, muted_users)
             try:
                 await context.bot.restrict_chat_member(
                     chat_id=chat_id,
                     user_id=user_id,
                     permissions=ChatPermissions(
-                        can_send_messages=False,
-                        can_send_media_messages=False,
-                        can_send_other_messages=False,
-                        can_add_web_page_previews=False
-                    ),
-                    until_date=now + value
+                        can_send_messages=True,
+                        can_send_media_messages=True,
+                        can_send_other_messages=True,
+                        can_add_web_page_previews=True
+                    )
                 )
+                print(f"[DEBUG] Button-unmute applied to user {user_id} in chat {chat_id}")
             except Exception as e:
-                print(f"Button mute failed: {e}")
-        await query.edit_message_text(f"{get_user_mention(user_id,None)} muted for {value//60} minutes")
-
+                print(f"[ERROR] Button unmute failed for user {user_id}: {e}")
+            await query.edit_message_text(f"{get_user_mention(user_id,None)} unmuted")
+        else:
+            await query.edit_message_text("User is not muted")
 
     elif action == "increase":
         if user_id in muted_users:
@@ -170,29 +198,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.edit_message_text("User is not muted")
 
-
-    elif action == "unmute":
-        if user_id in muted_users:
-            del muted_users[user_id]
-            save_data(MUTED_FILE, muted_users)
-            chat_id = query.message.chat.id if update.effective_chat else None
-            if chat_id:
-                try:
-                    await context.bot.restrict_chat_member(
-                        chat_id=chat_id,
-                        user_id=user_id,
-                        permissions=ChatPermissions(
-                            can_send_messages=True,
-                            can_send_media_messages=True,
-                            can_send_other_messages=True,
-                            can_add_web_page_previews=True
-                        )
-                    )
-                except Exception as e:
-                    print(f"Button unmute failed: {e}")
-            await query.edit_message_text(f"{get_user_mention(user_id,None)} unmuted")
-        else:
-            await query.edit_message_text("User is not muted")
 
 # ===== HANDLE MESSAGES =====
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -282,9 +287,10 @@ async def warn_user(msg, context):
         muted_users[uid] = now + mute_duration
         save_data(MUTED_FILE, muted_users)
 
+        chat_id = msg.chat.id
         try:
             await context.bot.restrict_chat_member(
-                chat_id=msg.chat.id,
+                chat_id=chat_id,
                 user_id=uid,
                 permissions=ChatPermissions(
                     can_send_messages=False,
@@ -294,11 +300,12 @@ async def warn_user(msg, context):
                 ),
                 until_date=now + mute_duration
             )
+            print(f"[DEBUG] Auto-muted user {uid} in chat {chat_id}")
         except Exception as e:
-            print(f"Auto-mute failed: {e}")
+            print(f"[ERROR] Auto-mute failed for user {uid}: {e}")
 
         mention = user_link(msg.from_user)
-        await log_action(f"{mention}, got muted automatically after {WARNING_LIMIT} warnings.", SPAM_CHANNEL_ID, context)
+        await log_action(f"{mention} got muted automatically after {WARNING_LIMIT} warnings.", SPAM_CHANNEL_ID, context)
 
 # ===== CHAT MEMBER HANDLER =====
 async def handle_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -406,6 +413,7 @@ app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
 
 print("Punisher bot is running...")
 app.run_polling()
+
 
 
 
