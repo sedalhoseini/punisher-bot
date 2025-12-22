@@ -308,43 +308,10 @@ async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== USER INFO COMMAND =====
 async def cmd_userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
+    await update.message.reply_text("USERINFO HANDLER WORKS")
 
-    # Detect user
-    if msg.reply_to_message and msg.reply_to_message.from_user:
-        user = msg.reply_to_message.from_user
-    elif msg.forward_from:
-        user = msg.forward_from
-    else:
-        await msg.reply_text(
-            "Reply to a user message or forward a message.",
-        )
-        return
-
-    username = f"@{user.username}" if user.username else "None"
-
-    text = (
-        f"<b>Name:</b> {user.first_name or ''} {user.last_name or ''}\n"
-        f"<b>Username:</b> {username}\n"
-        f"<b>ID:</b> <code>{user.id}</code>"
-    )
-
-    try:
-        photos = await context.bot.get_user_profile_photos(user.id)
-        if photos.total_count > 0:
-            await context.bot.send_photo(
-                chat_id=msg.chat_id,
-                photo=photos.photos[0][-1].file_id,
-                caption=text,
-                parse_mode="HTML"
-            )
-            return
-    except:
-        pass
-
-    await msg.reply_text(text, parse_mode="HTML")
-
-
+# ===== APPLICATION =====
+app = ApplicationBuilder().token(BOT_TOKEN).build()
 
 # ===== APP =====
 app.add_handler(ChatMemberHandler(handle_chat_member_update, ChatMemberHandler.CHAT_MEMBER))
@@ -364,6 +331,7 @@ app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
 
 print("Punisher bot is running...")
 app.run_polling()
+
 
 
 
