@@ -300,42 +300,24 @@ async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ===== USER INFO COMMAND =====
 async def cmd_userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    if not msg:
-        return
 
-    user = None
-
-    # 1️⃣ Reply to a message
+    # 1️⃣ Resolve target user
     if msg.reply_to_message and msg.reply_to_message.from_user:
         user = msg.reply_to_message.from_user
-
-    # 2️⃣ Forwarded message
-    elif msg.forward_from:
-        user = msg.forward_from
-
-    # 3️⃣ If username or ID provided as argument
     elif context.args:
         arg = context.args[0].lstrip("@")
         try:
             user = await context.bot.get_chat(arg)
         except:
-            await msg.reply_text("User not found or bot has no access.")
+            await msg.reply_text("User not found.")
             return
-
-    # 4️⃣ If in private chat, use sender
-    elif msg.chat.type == "private":
+    else:
         user = msg.from_user
 
-    # 5️⃣ Otherwise, ask user to reply or forward
-    else:
-        await msg.reply_text(
-            "Please reply to a message, forward a message, or use `/userinfo <username>`."
-        )
-        return
-
-    # Collect user info
+    # 2️⃣ Collect data
     username = f"@{user.username}" if user.username else "None"
     full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+
     text = (
         f"<b>Name:</b> {full_name}\n"
         f"<b>Username:</b> {username}\n"
@@ -343,7 +325,6 @@ async def cmd_userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>Bot:</b> {'Yes' if user.is_bot else 'No'}"
     )
 
-    # Send just text
     await msg.reply_text(text, parse_mode="HTML")
 
 
@@ -368,6 +349,7 @@ app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
 
 print("Punisher bot is running...")
 app.run_polling()
+
 
 
 
