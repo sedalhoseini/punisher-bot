@@ -308,55 +308,58 @@ async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== USER INFO COMMAND =====
 async def cmd_userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Usage:
-      /userinfo <username or numeric id>
-    Example:
-      /userinfo @someone
-      /userinfo 123456789
-    """
+    msg = update.message
 
-    # 1) get argument
-    try:
-        if not context.args:
-            await update.message.reply_text("Please provide a username or ID.")
-            return
-        target = context.args[0].strip()
-    except:
-        await update.message.reply_text("Usage: /userinfo <username or id>")
+    # Case 1: reply to a user
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        user = msg.reply_to_message.from_user
+
+    # Case 2: forwarded message
+    elif msg.forward_from:
+        user = msg.forward_from
+
+    elif msg.forward_from_chat:
+        chat = msg.forward_from_chat
+        text = (
+            f"Title: {chat.title}\n"
+            f"Username: @{chat.username if chat.username else 'None'}\n"
+            f"ID: `{chat.id}`"
+        )
+        await msg.reply_text(text, parse_mode="Markdown")
         return
 
-    # 2) try get chat info
-    try:
-        chat = await context.bot.get_chat(target)
-    except Exception as e:
-        await update.message.reply_text(f"Could not find user/chat: {e}")
+    else:
+        await msg.reply_text(
+            "Please reply to a user's message or forward a message.\n\n"
+            "Example:\n"
+            "• Reply to a message → /userinfo\n"
+            "• Forward a message → /userinfo"
+        )
         return
 
-    # 3) build output text
-    username = f"@{chat.username}" if chat.username else "(no username)"
-    user_id = chat.id
-    first = chat.first_name or ""
-    last = chat.last_name or ""
-    description = f"Name: {first} {last}\nUsername: {username}\nID: `{user_id}`"
+    # Build user info
+    username = f"@{user.username}" if user.username else "None"
+    text = (
+        f"Name: {user.first_name or ''} {user.last_name or ''}\n"
+        f"Username: {username}\n"
+        f"ID: `{user.id}`"
+    )
 
-    # 4) try get profile photo
+    # Try profile photo
     try:
-        photos = await context.bot.get_user_profile_photos(user_id)
+        photos = await context.bot.get_user_profile_photos(user.id)
         if photos.total_count > 0:
-            file_id = photos.photos[0][-1].file_id
             await context.bot.send_photo(
-                update.effective_chat.id,
-                file_id,
-                caption=description,
+                msg.chat_id,
+                photos.photos[0][-1].file_id,
+                caption=text,
                 parse_mode="Markdown"
             )
             return
     except:
         pass
 
-    # 5) send text only if no photo
-    await update.message.reply_text(description, parse_mode="Markdown")
+    await msg.reply_text(text, parse_mode="Markdown")
 
 
 # ===== APP =====
@@ -372,4 +375,5 @@ app.add_handler(CommandHandler("userinfo", cmd_userinfo))
 
 print("Punisher bot is running...")
 app.run_polling()
+
 
