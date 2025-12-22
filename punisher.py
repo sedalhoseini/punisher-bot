@@ -107,15 +107,6 @@ async def log_action(text, channel_id, context):
     except:
         pass
 
-# ===== ID REPLY HELPER =====
-async def reply_with_id(update, target_id):
-    try:
-        await update.message.reply_text(
-            f"`{target_id}`",
-            parse_mode="Markdown"
-        )
-    except:
-        pass
 
 # ===== BUTTON HANDLER =====
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -308,7 +299,48 @@ async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== USER INFO COMMAND =====
 async def cmd_userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("USERINFO HANDLER WORKS")
+    msg = update.message
+
+    # 1️⃣ Resolve target user
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        user = msg.reply_to_message.from_user
+    elif context.args:
+        arg = context.args[0].lstrip("@")
+        try:
+            user = await context.bot.get_chat(arg)
+        except:
+            await msg.reply_text("User not found.")
+            return
+    else:
+        user = msg.from_user
+
+    # 2️⃣ Collect data
+    username = f"@{user.username}" if user.username else "None"
+    full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+
+    text = (
+        f"<b>Name:</b> {full_name}\n"
+        f"<b>Username:</b> {username}\n"
+        f"<b>User ID:</b> <code>{user.id}</code>\n"
+        f"<b>Bot:</b> {'Yes' if user.is_bot else 'No'}"
+    )
+
+    # 3️⃣ Send with profile photo if exists
+    try:
+        photos = await context.bot.get_user_profile_photos(user.id)
+        if photos.total_count > 0:
+            await context.bot.send_photo(
+                chat_id=msg.chat_id,
+                photo=photos.photos[0][-1].file_id,
+                caption=text,
+                parse_mode="HTML"
+            )
+            return
+    except:
+        pass
+
+    await msg.reply_text(text, parse_mode="HTML")
+
 
 # ===== APPLICATION =====
 app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -331,6 +363,7 @@ app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
 
 print("Punisher bot is running...")
 app.run_polling()
+
 
 
 
