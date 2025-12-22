@@ -170,21 +170,69 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = msg.from_user.id
     now = int(time.time())
 
-    # NUMERIC MODE
-    if uid in WAITING_FOR_NUMERIC:
+    # --- NUMERIC MODE ACTIVE (@username / channel / forwarded / sticker / media) ---
+    if user_id in WAITING_FOR_NUMERIC:
         try:
+            replied = False
+
+            # @username or channel
             if msg.text and msg.text.startswith("@"):
                 chat = await context.bot.get_chat(msg.text)
-                numeric_id = chat.id
-            elif msg.forward_from_chat:
-                numeric_id = msg.forward_from_chat.id
-            else:
-                numeric_id = msg.from_user.id
-            await msg.reply_text(f"`{numeric_id}`", parse_mode="Markdown")
-        except:
-            pass
-        WAITING_FOR_NUMERIC.discard(uid)
-        return
+                await msg.reply_text(f"`{chat.id}`", parse_mode="Markdown")
+                replied = True
+
+            # forwarded channel
+            if msg.forward_from_chat:
+                await msg.reply_text(f"`{msg.forward_from_chat.id}`", parse_mode="Markdown")
+                replied = True
+
+            # normal user message
+            if msg.from_user:
+                await msg.reply_text(f"`{msg.from_user.id}`", parse_mode="Markdown")
+                replied = True
+
+            # stickers / media
+            if msg.sticker or msg.photo or msg.video or msg.audio or msg.voice:
+                await msg.reply_text(f"`{msg.from_user.id}`", parse_mode="Markdown")
+                replied = True
+
+        except Exception as e:
+            print(f"Numeric mode error: {e}")
+
+        WAITING_FOR_NUMERIC.discard(user_id)
+        # --- DO NOT BLOCK PRIVATE MESSAGE FORWARDING ---
+        # we let it continue below to forward the message
+
+    # ===== FORWARD PRIVATE MESSAGES =====
+    if msg.chat.type == "private" and msg.from_user:
+        try:
+            mention = get_user_mention(msg.from_user.id, msg.from_user.username)
+
+            # Forward text messages
+            if msg.text and not msg.text.startswith("/"):
+                await context.bot.send_message(MESSAGES_CHANNEL_ID, f'{mention}: "{msg.text}"', parse_mode="Markdown")
+
+            # Forward media / stickers
+            if msg.photo:
+                await context.bot.send_photo(MESSAGES_CHANNEL_ID, msg.photo[-1].file_id, caption=f"{mention}")
+            if msg.audio:
+                await context.bot.send_audio(MESSAGES_CHANNEL_ID, msg.audio.file_id, caption=f"{mention}")
+            if msg.document:
+                await context.bot.send_document(MESSAGES_CHANNEL_ID, msg.document.file_id, caption=f"{mention}")
+            if msg.video:
+                await context.bot.send_video(MESSAGES_CHANNEL_ID, msg.video.file_id, caption=f"{mention}")
+            if msg.voice:
+                await context.bot.send_voice(MESSAGES_CHANNEL_ID, msg.voice.file_id, caption=f"{mention}")
+            if msg.sticker:
+                await context.bot.send_sticker(MESSAGES_CHANNEL_ID, msg.sticker.file_id)
+                await context.bot.send_message(
+                    MESSAGES_CHANNEL_ID,
+                    user_link(msg.from_user),
+                    parse_mode="HTML"
+                )
+
+        except Exception as e:
+            print(f"Forwarding error: {e}")
 
     # DELETE JOIN / LEAVE
     if msg.new_chat_members or msg.left_chat_member:
@@ -348,3 +396,4 @@ app.add_handler(CommandHandler("get_numeric", get_numeric))
 
 print("Punisher bot is running...")
 app.run_polling()
+
