@@ -128,6 +128,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif action == "mute":
         try:
+            print(f"[DEBUG] Attempting to mute user {user_id} in chat {chat_id} until {now + value}")
             await context.bot.restrict_chat_member(
                 chat_id=chat_id,
                 user_id=user_id,
@@ -144,12 +145,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             print(f"[DEBUG] Button-mute applied to user {user_id} in chat {chat_id}")
             await query.edit_message_text(f"{get_user_mention(user_id,None)} muted for {value//60} minutes")
         except Exception as e:
-            print(f"[ERROR] Button mute failed for user {user_id}: {e}")
-            await query.edit_message_text("Failed to mute user.")
+            error_msg = str(e)
+            print(f"[ERROR] Button mute failed for user {user_id}: {error_msg}")
+            if "not enough rights" in error_msg.lower() or "bot_no_rights" in error_msg.lower():
+                await query.edit_message_text("Bot doesn't have permission to mute. Make sure bot is admin with 'Restrict Members' permission.")
+            elif "user is an administrator" in error_msg.lower():
+                await query.edit_message_text("Cannot mute administrators.")
+            else:
+                await query.edit_message_text(f"Mute failed: {error_msg}")
 
     elif action == "unmute":
         if user_id in muted_users:
             try:
+                print(f"[DEBUG] Attempting to unmute user {user_id} in chat {chat_id}")
                 await context.bot.restrict_chat_member(
                     chat_id=chat_id,
                     user_id=user_id,
@@ -166,8 +174,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 print(f"[DEBUG] Button-unmute applied to user {user_id} in chat {chat_id}")
                 await query.edit_message_text(f"{get_user_mention(user_id,None)} unmuted")
             except Exception as e:
-                print(f"[ERROR] Button unmute failed for user {user_id}: {e}")
-                await query.edit_message_text("Failed to unmute user.")
+                error_msg = str(e)
+                print(f"[ERROR] Button unmute failed for user {user_id}: {error_msg}")
+                if "not enough rights" in error_msg.lower() or "bot_no_rights" in error_msg.lower():
+                    await query.edit_message_text("Bot doesn't have permission to unmute. Make sure bot is admin with 'Restrict Members' permission.")
+                else:
+                    await query.edit_message_text(f"Unmute failed: {error_msg}")
         else:
             await query.edit_message_text("User is not muted")
 
@@ -175,6 +187,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id in muted_users:
             new_until = muted_users[user_id] + value
             try:
+                print(f"[DEBUG] Attempting to increase mute for user {user_id} in chat {chat_id}")
                 await context.bot.restrict_chat_member(
                     chat_id=chat_id,
                     user_id=user_id,
@@ -192,8 +205,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 print(f"[DEBUG] Button-increase applied to user {user_id} in chat {chat_id}")
                 await query.edit_message_text(f"Muted duration increased for {get_user_mention(user_id,None)}. New until: {until_str}")
             except Exception as e:
-                print(f"[ERROR] Button increase failed: {e}")
-                await query.edit_message_text("Failed to increase mute duration.")
+                error_msg = str(e)
+                print(f"[ERROR] Button increase failed: {error_msg}")
+                if "not enough rights" in error_msg.lower() or "bot_no_rights" in error_msg.lower():
+                    await query.edit_message_text("Bot doesn't have permission. Make sure bot is admin with 'Restrict Members' permission.")
+                else:
+                    await query.edit_message_text(f"Duration increase failed: {error_msg}")
         else:
             await query.edit_message_text("User is not muted")
 
