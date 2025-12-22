@@ -300,9 +300,12 @@ async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ===== USER INFO COMMAND =====
 async def cmd_userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
+    if not msg:
+        return
+
     user = None
 
-    # 1️⃣ Reply to a user
+    # 1️⃣ Reply to a message
     if msg.reply_to_message and msg.reply_to_message.from_user:
         user = msg.reply_to_message.from_user
 
@@ -310,20 +313,27 @@ async def cmd_userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif msg.forward_from:
         user = msg.forward_from
 
-    # 3️⃣ Username argument
+    # 3️⃣ If username or ID provided as argument
     elif context.args:
-        username = context.args[0].lstrip("@")
+        arg = context.args[0].lstrip("@")
         try:
-            user = await context.bot.get_chat(username)
+            user = await context.bot.get_chat(arg)
         except:
             await msg.reply_text("User not found or bot has no access.")
             return
 
-    # 4️⃣ Default to the sender if nothing else
-    else:
+    # 4️⃣ If in private chat, use sender
+    elif msg.chat.type == "private":
         user = msg.from_user
 
-    # Collect info
+    # 5️⃣ Otherwise, ask user to reply or forward
+    else:
+        await msg.reply_text(
+            "Please reply to a message, forward a message, or use `/userinfo <username>`."
+        )
+        return
+
+    # Collect user info
     username = f"@{user.username}" if user.username else "None"
     full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
     text = (
@@ -333,8 +343,7 @@ async def cmd_userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>Bot:</b> {'Yes' if user.is_bot else 'No'}"
     )
 
-
-    # Otherwise, send text info
+    # Send just text
     await msg.reply_text(text, parse_mode="HTML")
 
 
@@ -359,6 +368,7 @@ app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
 
 print("Punisher bot is running...")
 app.run_polling()
+
 
 
 
