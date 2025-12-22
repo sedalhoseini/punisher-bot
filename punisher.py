@@ -126,7 +126,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "mute":
         muted_users[user_id] = now + value
         save_data(MUTED_FILE, muted_users)
-        chat_id = update.effective_chat.id if update.effective_chat else None
+        chat_id = query.message.chat.id if update.effective_chat else None
         if chat_id:
             try:
                 await context.bot.restrict_chat_member(
@@ -149,7 +149,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id in muted_users:
             muted_users[user_id] += value
             save_data(MUTED_FILE, muted_users)
-            chat_id = update.effective_chat.id if update.effective_chat else None
+            chat_id = query.message.chat.id if update.effective_chat else None
             until_str = datetime.fromtimestamp(muted_users[user_id], tz=TEHRAN).strftime("%Y-%m-%d %H:%M:%S")
             if chat_id:
                 try:
@@ -175,7 +175,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id in muted_users:
             del muted_users[user_id]
             save_data(MUTED_FILE, muted_users)
-            chat_id = update.effective_chat.id if update.effective_chat else None
+            chat_id = query.message.chat.id if update.effective_chat else None
             if chat_id:
                 try:
                     await context.bot.restrict_chat_member(
@@ -406,6 +406,7 @@ app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
 
 print("Punisher bot is running...")
 app.run_polling()
+
 
 
 
