@@ -133,8 +133,10 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Cannot broadcast empty message!")
         return
 
-    data = load_data()
-    for u in data["students"].values():
+    with db() as c:
+        users = c.execute("SELECT user_id FROM users").fetchall()
+
+    for u in users:
         try:
             await context.bot.send_message(chat_id=u["user_id"], text=msg)
         except Exception as e:
@@ -177,5 +179,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
