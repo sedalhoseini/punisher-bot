@@ -4,16 +4,19 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     JobQueue,
+    MessageHandler,
+    filters
 )
-import os, json, random, asyncio
-from datetime import datetime, time as dt_time, timedelta
+import os, json, random
+from datetime import datetime
+import pytz
 
 # ===== CONFIG =====
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # Or set directly: BOT_TOKEN = "YOUR_TOKEN_HERE"
-ADMIN_USER_IDS = {527164608}  # Replace with your admin ID
-
+BOT_TOKEN = os.getenv("BOT_TOKEN") or "YOUR_BOT_TOKEN_HERE"
+ADMIN_USER_IDS = {527164608}  # Replace with your Telegram ID
 WORDS_FILE = "words.json"
 SUBSCRIPTIONS_FILE = "subscriptions.json"
+LOCAL_TZ = pytz.timezone("Asia/Tehran")  # Change if needed
 
 # ===== HELPERS =====
 def load_json(file_path, default):
@@ -55,12 +58,14 @@ async def receive_words(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_words = update.message.text.splitlines()
     words_data = load_json(WORDS_FILE, {})
     words_data.setdefault(topic, [])
+    added_count = 0
     for w in new_words:
         w_clean = w.strip()
         if w_clean and w_clean not in words_data[topic]:
             words_data[topic].append(w_clean)
+            added_count += 1
     save_json(WORDS_FILE, words_data)
-    await update.message.reply_text(f"Added {len(new_words)} words to topic '{topic}'.")
+    await update.message.reply_text(f"Added {added_count} words to topic '{topic}'.")
 
 async def listtopics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     words_data = load_json(WORDS_FILE, {})
@@ -107,7 +112,9 @@ async def settime(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     t = context.args[0]
     try:
-        datetime.strptime(t, "%H:%M")
+        hh, mm = map(int, t.split(":"))
+        if not (0 <= hh < 24 and 0 <= mm < 60):
+            raise ValueError
     except:
         await update.message.reply_text("Invalid time format. Use HH:MM (24-hour).")
         return
@@ -156,7 +163,6 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if topic:
         words = words_data.get(topic, [])
     else:
-        # all words
         words = [w for ws in words_data.values() for w in ws]
     if not words:
         await update.message.reply_text("No words available yet.")
@@ -165,13 +171,12 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== DAILY SENDING =====
 async def send_daily_words(context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.utcnow()
+    now = datetime.now(LOCAL_TZ)
     subs = load_json(SUBSCRIPTIONS_FILE, {})
     words_data = load_json(WORDS_FILE, {})
 
     for user_id, data in subs.items():
         hh, mm = map(int, data.get("time", "09:00").split(":"))
-        # compare UTC time (adjust if needed for your timezone)
         if now.hour == hh and now.minute == mm:
             topic = data.get("topic")
             if topic:
@@ -192,7 +197,7 @@ app = ApplicationBuilder().token(BOT_TOKEN).build()
 app.add_handler(CommandHandler("addwords", addwords))
 app.add_handler(CommandHandler("listtopics", listtopics))
 app.add_handler(CommandHandler("listwords", listwords))
-app.add_handler(MessageHandler(None, receive_words))  # catch message for adding words
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_words))  # for adding words
 
 # ---- USER HANDLERS ----
 app.add_handler(CommandHandler("subscribe", subscribe))
