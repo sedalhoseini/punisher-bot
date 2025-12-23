@@ -90,8 +90,8 @@ async def send_word(update_or_query, context, word_row):
     else:
         await update_or_query.reply_text(text, parse_mode="Markdown")
 
-    # Send pronunciation if available
-    pron_url = word_row.get("pronunciation")
+    # Send pronunciation safely
+    pron_url = word_row["pronunciation"] if "pronunciation" in word_row.keys() else None
     if pron_url:
         if hasattr(update_or_query, "answer"):
             await update_or_query.message.reply_audio(pron_url)
@@ -185,8 +185,9 @@ async def add_word_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif "example" not in context.user_data:
             context.user_data["example"] = text
             await update.message.reply_text("Send pronunciation audio URL (or type 'skip'):")
-            return ADD_PRON
+            return ADD_PRON  # <-- Make sure we return this state!
     elif mode == "bulk":
+        # Bulk mode processing
         lines = text.splitlines()
         success = 0
         failed = 0
@@ -279,3 +280,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
