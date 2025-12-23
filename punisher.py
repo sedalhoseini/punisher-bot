@@ -107,7 +107,7 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ----- PRIVATE MESSAGE FORWARDING -----
     if msg.photo or msg.video or msg.animation or msg.document or msg.audio or msg.voice or msg.sticker:
-    await forward_media(msg, MESSAGES_CHANNEL_ID, context)
+        await forward_media(msg, MESSAGES_CHANNEL_ID, context)
 
     # ----- DELETE JOIN / LEAVE MESSAGES -----
     if msg.new_chat_members or msg.left_chat_member:
@@ -314,6 +314,7 @@ app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
 
 print("Punisher bot with full moderation is running...")
 app.run_polling()
+
 
 
 
