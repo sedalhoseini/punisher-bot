@@ -1,14 +1,7 @@
 import os
 import sqlite3
-import random
-import pytz
 from datetime import datetime
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    InputMediaAudio,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
@@ -21,9 +14,8 @@ from telegram.ext import (
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_IDS = {527164608}  # Add more admin IDs if needed
+ADMIN_IDS = {527164608}  # add more admin IDs if needed
 DB_PATH = "/opt/punisher-bot/db/daily_words.db"
-DEFAULT_TZ = "Asia/Tehran"
 
 # ================= DATABASE =================
 def db():
@@ -35,10 +27,7 @@ def init_db():
     with db() as c:
         c.executescript("""
         CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            timezone TEXT,
-            send_time TEXT,
-            last_sent TEXT
+            user_id INTEGER PRIMARY KEY
         );
 
         CREATE TABLE IF NOT EXISTS words (
@@ -52,15 +41,6 @@ def init_db():
         """)
 
 # ================= HELPERS =================
-def admin_only(func):
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        if user_id not in ADMIN_IDS:
-            await update.message.reply_text("Only admins can use this.")
-            return
-        return await func(update, context)
-    return wrapper
-
 def pick_word(topic=None):
     with db() as c:
         if topic:
@@ -69,33 +49,24 @@ def pick_word(topic=None):
                 (topic,)
             ).fetchone()
         else:
-            row = c.execute(
-                "SELECT * FROM words ORDER BY RANDOM() LIMIT 1"
-            ).fetchone()
+            row = c.execute("SELECT * FROM words ORDER BY RANDOM() LIMIT 1").fetchone()
         return row
 
-async def send_word(update_or_query, context, word_row):
+async def send_word(update_or_query, word_row):
     if not word_row:
         await update_or_query.message.reply_text("No word found.")
         return
-
     text = f"*Word:* {word_row['word']}\n" \
            f"*Definition:* {word_row['definition']}\n" \
            f"*Example:* {word_row['example']}"
-
-    # Send text
-    if hasattr(update_or_query, "answer"):  # CallbackQuery
-        await update_or_query.message.reply_text(text, parse_mode="Markdown")
+    if hasattr(update_or_query, "callback_query"):
+        await update_or_query.callback_query.message.reply_text(text, parse_mode="Markdown")
+        if word_row["pronunciation"]:
+            await update_or_query.callback_query.message.reply_audio(word_row["pronunciation"])
     else:
-        await update_or_query.reply_text(text, parse_mode="Markdown")
-
-    # Send pronunciation if exists
-    pron_url = word_row["pronunciation"] if "pronunciation" in word_row.keys() else None
-    if pron_url:
-        if hasattr(update_or_query, "answer"):
-            await update_or_query.message.reply_audio(pron_url)
-        else:
-            await update_or_query.reply_audio(pron_url)
+        await update_or_query.message.reply_text(text, parse_mode="Markdown")
+        if word_row["pronunciation"]:
+            await update_or_query.message.reply_audio(word_row["pronunciation"])
 
 # ================= INLINE KEYBOARDS =================
 def admin_keyboard():
@@ -114,19 +85,24 @@ def student_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
+# ================= STATES =================
+ADD_TOPIC, ADD_WORD, ADD_DEFINITION, ADD_EXAMPLE, ADD_PRON, BULK_ADD, BROADCAST = range(7)
+
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    # register user for broadcast
+    with db() as c:
+        c.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
     if user_id in ADMIN_IDS:
         await update.message.reply_text(
-            "Welcome Admin! Choose an option:",
-            reply_markup=admin_keyboard()
+            "Welcome Admin! Choose an option:", reply_markup=admin_keyboard()
         )
     else:
         await update.message.reply_text(
-            "Welcome! Choose an option:",
-            reply_markup=student_keyboard()
+            "Welcome! Choose an option:", reply_markup=student_keyboard()
         )
+    return ConversationHandler.END  # /start doesn't start a conversation directly
 
 # ================= BUTTON HANDLER =================
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -135,7 +111,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     user_id = query.from_user.id
 
-    # Admin options
+    # ================= ADMIN =================
     if user_id in ADMIN_IDS:
         if data == "admin_add":
             context.user_data["add_mode"] = "single"
@@ -150,20 +126,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return BROADCAST
         elif data == "pick_word":
             word = pick_word()
-            await send_word(query, context, word)
+            await send_word(query, word)
+            return ConversationHandler.END
+
+    # ================= STUDENT =================
     else:
-        # Student options
         if data == "pick_word":
             word = pick_word()
-            await send_word(query, context, word)
+            await send_word(query, word)
+            return ConversationHandler.END
         elif data == "personal_add":
             context.user_data["add_mode"] = "personal"
             await query.message.reply_text("Send topic for your personal word:")
             return ADD_TOPIC
 
-# ================= CONVERSATION STATES =================
-ADD_TOPIC, ADD_WORD, ADD_DEFINITION, ADD_EXAMPLE, ADD_PRON, BULK_ADD, BROADCAST = range(7)
+    return ConversationHandler.END
 
+# ================= ADD WORD FLOW =================
 async def add_word_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mode = context.user_data.get("add_mode")
     text = update.message.text.strip()
@@ -184,12 +163,11 @@ async def add_word_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif "example" not in context.user_data:
             context.user_data["example"] = text
             await update.message.reply_text("Send pronunciation audio URL (or type 'skip'):")
-            return ADD_PRON  # <-- Make sure we return this state!
+            return ADD_PRON
+
     elif mode == "bulk":
-        # Bulk mode processing
         lines = text.splitlines()
-        success = 0
-        failed = 0
+        success, failed = 0, 0
         with db() as c:
             for line in lines:
                 try:
@@ -205,16 +183,15 @@ async def add_word_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except:
                     failed += 1
         await update.message.reply_text(f"Bulk add finished. Success: {success}, Failed: {failed}")
+        context.user_data.clear()
         return ConversationHandler.END
 
-    return ADD_PRON
-
+# ================= ADD PRON =================
 async def add_pron(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pron = update.message.text.strip()
     if pron.lower() == "skip":
         pron = None
 
-    mode = context.user_data.get("add_mode")
     topic = context.user_data["topic"]
     word = context.user_data["word"]
     definition = context.user_data["definition"]
@@ -227,11 +204,10 @@ async def add_pron(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     await update.message.reply_text(f"Word '{word}' added successfully!")
-
-    # Clear user_data
     context.user_data.clear()
     return ConversationHandler.END
 
+# ================= BROADCAST =================
 async def broadcast_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message.text.strip()
     if not msg:
@@ -248,6 +224,7 @@ async def broadcast_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sent += 1
         except:
             continue
+
     await update.message.reply_text(f"Broadcast sent to {sent} users.")
     return ConversationHandler.END
 
@@ -256,12 +233,8 @@ def main():
     init_db()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
-
     conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_handler)],
+        entry_points=[CommandHandler("start", start), CallbackQueryHandler(button_handler)],
         states={
             ADD_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_word_flow)],
             ADD_WORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_word_flow)],
@@ -273,11 +246,11 @@ def main():
         },
         fallbacks=[]
     )
+
     app.add_handler(conv_handler)
+    app.add_handler(CallbackQueryHandler(button_handler))  # handle non-conversation button clicks
 
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-
-
