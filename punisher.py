@@ -1,5 +1,6 @@
-import os
+import asyncio
 import json
+import os
 import random
 import pytz
 from datetime import datetime, time as dt_time
@@ -13,15 +14,17 @@ from telegram.ext import (
 )
 
 # ===== CONFIG =====
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # Make sure this is set in your environment
-ADMIN_IDS = {527164608}  # Add your admin Telegram ID(s)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_IDS = {527164608}  # Add admin user IDs here
 DATA_FILE = "daily_words.json"
 TIMEZONE = pytz.timezone("Asia/Tehran")
 
 # ===== STORAGE HELPERS =====
 def load_data():
     if not os.path.exists(DATA_FILE):
-        return {"words": {}, "students": {}}
+        data = {"words": {}, "students": {}}
+        save_data(data)
+        return data
     with open(DATA_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -33,20 +36,45 @@ def save_data(data):
 def admin_only(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
-        if not user or user.id not in ADMIN_IDS:
+        if user.id not in ADMIN_IDS:
             await update.message.reply_text("You are not allowed to use this command.")
             return
         return await func(update, context)
     return wrapper
 
-def pick_word(words_data, topic=None):
+def pick_word(words_dict, topic=None):
     if topic:
-        topic_words = words_data.get(topic, [])
-    else:
-        topic_words = [w for t in words_data.values() for w in t]
-    return random.choice(topic_words) if topic_words else None
+        return random.choice(words_dict.get(topic, [])) if words_dict.get(topic) else None
+    all_words = [w for t in words_dict.values() for w in t]
+    return random.choice(all_words) if all_words else None
 
-# ===== ADMIN COMMANDS =====
+# ===== DAILY WORD SENDER =====
+async def daily_word_job(app):
+    while True:
+        now = datetime.now(TIMEZONE)
+        data = load_data()
+        for user_id, info in data["students"].items():
+            try:
+                sub_time = info.get("time", "09:00")
+                hour, minute = map(int, sub_time.split(":"))
+                send_time = dt_time(hour, minute)
+                if now.time().hour == send_time.hour and now.time().minute == send_time.minute:
+                    word = pick_word(data["words"], info.get("topic"))
+                    if not word:
+                        await app.bot.send_message(
+                            chat_id=int(user_id),
+                            text="No words available yet. Admin can add words using /addword."
+                        )
+                        continue
+                    await app.bot.send_message(
+                        chat_id=int(user_id),
+                        text=f"Today's word: {word}"
+                    )
+            except Exception as e:
+                await app.bot.send_message(chat_id=int(user_id), text=f"Error sending word: {e}")
+        await asyncio.sleep(60)  # check every minute
+
+# ===== COMMANDS =====
 @admin_only
 async def add_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -56,7 +84,8 @@ async def add_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
     topic = context.args[0]
     words = " ".join(context.args[1:]).split(",")
     data = load_data()
-    data["words"].setdefault(topic, [])
+    if topic not in data["words"]:
+        data["words"][topic] = []
     data["words"][topic].extend([w.strip() for w in words if w.strip()])
     save_data(data)
     await msg.reply_text(f"Added words to topic '{topic}': {', '.join(words)}")
@@ -70,21 +99,20 @@ async def list_topics(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("Topics:\n" + "\n".join(topics))
 
-# ===== STUDENT COMMANDS =====
 async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     user_id = str(msg.from_user.id)
     mode = "random"
     topic = None
     send_time = "09:00"
-    # Parse optional arguments
-    for arg in context.args:
-        if arg.startswith("time="):
-            send_time = arg.split("=")[1]
-        elif arg.startswith("topic="):
-            topic = arg.split("=")[1]
-        elif arg.startswith("mode="):
-            mode = arg.split("=")[1]
+    if context.args:
+        for arg in context.args:
+            if arg.startswith("time="):
+                send_time = arg.split("=")[1]
+            elif arg.startswith("topic="):
+                topic = arg.split("=")[1]
+            elif arg.startswith("mode="):
+                mode = arg.split("=")[1]
     data = load_data()
     data["students"][user_id] = {"mode": mode, "topic": topic, "time": send_time}
     save_data(data)
@@ -106,51 +134,36 @@ async def get_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(msg.from_user.id)
     data = load_data()
     info = data["students"].get(user_id, {})
-    topic = info.get("topic", None)
-    word = pick_word(data["words"], topic)
+    word = pick_word(data["words"], info.get("topic"))
     if not word:
-        await msg.reply_text("No words available yet.")
+        await msg.reply_text("No words available yet. Admin can add words using /addword.")
         return
     await msg.reply_text(f"Your word: {word}")
 
-# ===== DEBUG HANDLER =====
 async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"Received: {update.message.text}")
+    await update.message.reply_text(f"Debug: received command: {update.message.text}")
 
-# ===== SCHEDULED DAILY WORD TASK =====
-async def daily_word_job(context: ContextTypes.DEFAULT_TYPE):
-    data = load_data()
-    now = datetime.now(TIMEZONE)
-    for user_id, info in data["students"].items():
-        try:
-            hour, minute = map(int, info.get("time", "09:00").split(":"))
-            if now.hour == hour and now.minute == minute:
-                topic = info.get("topic")
-                word = pick_word(data["words"], topic)
-                if word:
-                    await context.bot.send_message(chat_id=int(user_id), text=f"Today's word: {word}")
-                else:
-                    await context.bot.send_message(chat_id=int(user_id), text="No words available yet.")
-        except Exception as e:
-            print(f"Error sending daily word to {user_id}: {e}")
-
-# ===== APPLICATION SETUP =====
+# ===== APPLICATION =====
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# Admin
+# Admin commands
 app.add_handler(CommandHandler("addword", add_word))
 app.add_handler(CommandHandler("listtopics", list_topics))
 
-# Students
+# Student commands
 app.add_handler(CommandHandler("subscribe", subscribe))
 app.add_handler(CommandHandler("unsubscribe", unsubscribe))
 app.add_handler(CommandHandler("getword", get_word))
 
-# Debug
+# Debug (catch-all)
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, debug))
 
-# Schedule job every minute
-app.job_queue.run_repeating(daily_word_job, interval=60, first=0)
+# ===== MAIN =====
+async def main():
+    # Start daily word task
+    asyncio.create_task(daily_word_job(app))
+    print("Daily Word Bot running...")
+    await app.run_polling()
 
-print("Daily Word Bot running...")
-app.run_polling()
+if __name__ == "__main__":
+    asyncio.run(main())
