@@ -15,7 +15,7 @@ from telegram.ext import (
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = {527164608}
-DB_PATH = "/opt/punisher-bot/data/bot.db"
+DB_PATH = "/opt/punisher-bot/db/daily_words.db"
 DEFAULT_TZ = "Asia/Tehran"
 
 # ================= DATABASE =================
@@ -170,3 +170,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
