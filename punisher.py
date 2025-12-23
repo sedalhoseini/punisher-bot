@@ -56,31 +56,47 @@ async def log_action(text, context, channel_id=LOG_CHANNEL_ID):
 
 # ===== MEDIA FORWARDING =====
 async def forward_media(msg, channel_id, context):
-    """Forward all media types with captions + user mention."""
+    """Forward any type of media with mention and caption."""
     try:
-        # Build caption with mention
+        # Build mention
         user_mention = f"@{msg.from_user.username}" if msg.from_user.username else f'<a href="tg://user?id={msg.from_user.id}">{msg.from_user.full_name}</a>'
         caption = f"{user_mention}: {msg.caption}" if getattr(msg, "caption", None) else user_mention
 
-        # Forward each type properly
-        if getattr(msg, "photo", None):
-            await context.bot.send_photo(channel_id, msg.photo[-1].file_id, caption=caption, parse_mode="HTML")
-        elif getattr(msg, "video", None):
-            await context.bot.send_video(channel_id, msg.video.file_id, caption=caption, parse_mode="HTML")
-        elif getattr(msg, "animation", None):
-            await context.bot.send_animation(channel_id, msg.animation.file_id, caption=caption, parse_mode="HTML")
-        elif getattr(msg, "document", None):
-            await context.bot.send_document(channel_id, msg.document.file_id, caption=caption, parse_mode="HTML")
-        elif getattr(msg, "audio", None):
-            await context.bot.send_audio(channel_id, msg.audio.file_id, caption=caption, parse_mode="HTML")
-        elif getattr(msg, "voice", None):
-            await context.bot.send_voice(channel_id, msg.voice.file_id, caption=caption, parse_mode="HTML")
-        elif getattr(msg, "sticker", None):
-            await context.bot.send_sticker(channel_id, msg.sticker.file_id)
-            # Send mention separately for stickers
-            await context.bot.send_message(channel_id, user_mention, parse_mode="HTML")
+        # ----- PHOTO -----
+        if msg.photo:
+            # Take largest size
+            file_id = msg.photo[-1].file_id
+            await context.bot.send_photo(chat_id=channel_id, photo=file_id, caption=caption, parse_mode="HTML")
+            return
+        # ----- VIDEO -----
+        if msg.video:
+            await context.bot.send_video(chat_id=channel_id, video=msg.video.file_id, caption=caption, parse_mode="HTML")
+            return
+        # ----- ANIMATION (GIF) -----
+        if msg.animation:
+            await context.bot.send_animation(chat_id=channel_id, animation=msg.animation.file_id, caption=caption, parse_mode="HTML")
+            return
+        # ----- DOCUMENT (PDF, etc.) -----
+        if msg.document:
+            await context.bot.send_document(chat_id=channel_id, document=msg.document.file_id, caption=caption, parse_mode="HTML")
+            return
+        # ----- AUDIO -----
+        if msg.audio:
+            await context.bot.send_audio(chat_id=channel_id, audio=msg.audio.file_id, caption=caption, parse_mode="HTML")
+            return
+        # ----- VOICE -----
+        if msg.voice:
+            await context.bot.send_voice(chat_id=channel_id, voice=msg.voice.file_id, caption=caption, parse_mode="HTML")
+            return
+        # ----- STICKER -----
+        if msg.sticker:
+            await context.bot.send_sticker(chat_id=channel_id, sticker=msg.sticker.file_id)
+            # Send mention separately
+            await context.bot.send_message(chat_id=channel_id, text=user_mention, parse_mode="HTML")
+            return
+
     except Exception as e:
-        print(f"Media forwarding error: {e}")
+        print(f"Media forwarding failed: {e}")
 
 
 # ===== HANDLE MESSAGES =====
@@ -90,11 +106,8 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ----- PRIVATE MESSAGE FORWARDING -----
-    if msg.chat.type == "private" and not msg.text.startswith("/"):
-        mention = get_user_mention(msg.from_user)
-        if msg.text:
-            await context.bot.send_message(MESSAGES_CHANNEL_ID, f'{mention}: "{msg.text}"')
-        await forward_media(msg, MESSAGES_CHANNEL_ID, mention, context)
+    if msg.photo or msg.video or msg.animation or msg.document or msg.audio or msg.voice or msg.sticker:
+    await forward_media(msg, MESSAGES_CHANNEL_ID, context)
 
     # ----- DELETE JOIN / LEAVE MESSAGES -----
     if msg.new_chat_members or msg.left_chat_member:
@@ -301,5 +314,6 @@ app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
 
 print("Punisher bot with full moderation is running...")
 app.run_polling()
+
 
 
