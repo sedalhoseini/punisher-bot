@@ -16,7 +16,11 @@ BOT_TOKEN = os.getenv("BOT_TOKEN") or "YOUR_BOT_TOKEN_HERE"
 ADMIN_USER_IDS = {527164608}  # Replace with your Telegram ID
 WORDS_FILE = "words.json"
 SUBSCRIPTIONS_FILE = "subscriptions.json"
-LOCAL_TZ = pytz.timezone("Asia/Tehran")  # Change if needed
+LOCAL_TZ = pytz.timezone("Asia/Tehran")  # Adjust if needed
+
+# ===== GLOBALS =====
+pending_words = {}  # {admin_user_id: topic} for /addwords
+last_sent_minutes = {}  # {user_id: last_sent_minute}
 
 # ===== HELPERS =====
 def load_json(file_path, default):
@@ -39,22 +43,29 @@ def admin_only(func):
         return await func(update, context)
     return wrapper
 
-# ===== WORD MANAGEMENT =====
+def get_words(topic=None):
+    words_data = load_json(WORDS_FILE, {})
+    if topic:
+        return words_data.get(topic, [])
+    else:
+        # Flatten all words if no topic
+        return [w for ws in words_data.values() for w in ws]
+
+# ===== ADMIN COMMANDS =====
 @admin_only
 async def addwords(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 1:
-        await update.message.reply_text("Usage: /addwords <topic>\nThen send words line by line in the next message.")
+        await update.message.reply_text("Usage: /addwords <topic>")
         return
-
     topic = context.args[0]
-    context.user_data['pending_topic'] = topic
-    await update.message.reply_text(f"Send the words for topic '{topic}', one per line.")
+    pending_words[update.effective_user.id] = topic
+    await update.message.reply_text(f"Send the words line by line for topic '{topic}' now.")
 
 async def receive_words(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if 'pending_topic' not in context.user_data:
-        return  # Ignore if not adding words
-
-    topic = context.user_data.pop('pending_topic')
+    user_id = update.effective_user.id
+    if user_id not in pending_words:
+        return  # Not in adding mode
+    topic = pending_words.pop(user_id)
     new_words = update.message.text.splitlines()
     words_data = load_json(WORDS_FILE, {})
     words_data.setdefault(topic, [])
@@ -67,6 +78,7 @@ async def receive_words(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_json(WORDS_FILE, words_data)
     await update.message.reply_text(f"Added {added_count} words to topic '{topic}'.")
 
+@admin_only
 async def listtopics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     words_data = load_json(WORDS_FILE, {})
     if not words_data:
@@ -74,25 +86,26 @@ async def listtopics(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("Topics:\n" + "\n".join(words_data.keys()))
 
+@admin_only
 async def listwords(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 1:
         await update.message.reply_text("Usage: /listwords <topic>")
         return
     topic = context.args[0]
-    words_data = load_json(WORDS_FILE, {})
-    if topic not in words_data or not words_data[topic]:
+    words = get_words(topic)
+    if not words:
         await update.message.reply_text(f"No words found for topic '{topic}'.")
         return
-    await update.message.reply_text(f"Words for '{topic}':\n" + "\n".join(words_data[topic]))
+    await update.message.reply_text(f"Words for '{topic}':\n" + "\n".join(words))
 
-# ===== USER SUBSCRIPTION =====
+# ===== USER COMMANDS =====
 async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     subs = load_json(SUBSCRIPTIONS_FILE, {})
     if user_id in subs:
         await update.message.reply_text("You are already subscribed.")
         return
-    subs[user_id] = {"time": "09:00", "topic": None}  # default 9 AM
+    subs[user_id] = {"time": "09:00", "topic": None}
     save_json(SUBSCRIPTIONS_FILE, subs)
     await update.message.reply_text("Subscribed to daily words. Default time is 09:00. Use /settime HH:MM to change.")
 
@@ -159,36 +172,31 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("You are not subscribed. Use /subscribe first.")
         return
     topic = subs[user_id].get("topic")
-    words_data = load_json(WORDS_FILE, {})
-    if topic:
-        words = words_data.get(topic, [])
-    else:
-        words = [w for ws in words_data.values() for w in ws]
+    words = get_words(topic)
     if not words:
         await update.message.reply_text("No words available yet.")
         return
     await update.message.reply_text(f"Today's word: {random.choice(words)}")
 
-# ===== DAILY SENDING =====
+# ===== DAILY JOB =====
 async def send_daily_words(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(LOCAL_TZ)
     subs = load_json(SUBSCRIPTIONS_FILE, {})
-    words_data = load_json(WORDS_FILE, {})
-
     for user_id, data in subs.items():
         hh, mm = map(int, data.get("time", "09:00").split(":"))
-        if now.hour == hh and now.minute == mm:
+        # Avoid sending multiple times within same minute
+        last_min = last_sent_minutes.get(user_id)
+        if now.hour == hh and now.minute == mm and last_min != now.minute:
             topic = data.get("topic")
-            if topic:
-                words = words_data.get(topic, [])
-            else:
-                words = [w for ws in words_data.values() for w in ws]
-            if words:
-                word = random.choice(words)
-                try:
-                    await context.bot.send_message(chat_id=int(user_id), text=f"Daily word: {word}")
-                except Exception as e:
-                    print(f"Failed to send to {user_id}: {e}")
+            words = get_words(topic)
+            if not words:
+                continue
+            word = random.choice(words)
+            try:
+                await context.bot.send_message(chat_id=int(user_id), text=f"Daily word: {word}")
+                last_sent_minutes[user_id] = now.minute
+            except Exception as e:
+                print(f"Failed to send daily word to {user_id}: {e}")
 
 # ===== APPLICATION =====
 app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -197,7 +205,7 @@ app = ApplicationBuilder().token(BOT_TOKEN).build()
 app.add_handler(CommandHandler("addwords", addwords))
 app.add_handler(CommandHandler("listtopics", listtopics))
 app.add_handler(CommandHandler("listwords", listwords))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_words))  # for adding words
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_words))
 
 # ---- USER HANDLERS ----
 app.add_handler(CommandHandler("subscribe", subscribe))
@@ -209,7 +217,7 @@ app.add_handler(CommandHandler("today", today))
 
 # ---- JOB QUEUE ----
 job_queue: JobQueue = app.job_queue
-job_queue.run_repeating(send_daily_words, interval=60, first=10)  # check every minute
+job_queue.run_repeating(send_daily_words, interval=60, first=10)
 
-print("Daily Word Bot is running...")
+print("Daily Word Bot with feedback is running...")
 app.run_polling()
