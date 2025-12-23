@@ -55,9 +55,12 @@ async def log_action(text, context, channel_id=LOG_CHANNEL_ID):
 
 
 # ===== MEDIA FORWARDING =====
-async def forward_media(msg, channel_id, mention, context):
+async def forward_media(msg, channel_id, context):
+    """Forward all media types with captions + user mention."""
     try:
-        caption = mention
+        user_mention = f"@{msg.from_user.username}" if msg.from_user.username else f'<a href="tg://user?id={msg.from_user.id}">{msg.from_user.full_name}</a>'
+        caption = f"{user_mention}: {msg.caption}" if msg.caption else user_mention
+
         if msg.photo:
             await context.bot.send_photo(channel_id, msg.photo[-1].file_id, caption=caption)
         elif msg.video:
@@ -72,9 +75,10 @@ async def forward_media(msg, channel_id, mention, context):
             await context.bot.send_voice(channel_id, msg.voice.file_id, caption=caption)
         elif msg.sticker:
             await context.bot.send_sticker(channel_id, msg.sticker.file_id)
-            await context.bot.send_message(channel_id, mention, parse_mode="HTML")
+            # Send mention separately for sticker
+            await context.bot.send_message(channel_id, user_mention, parse_mode="HTML")
     except Exception as e:
-        await log_action(f"Forwarding error: {e}", context)
+        await context.bot.send_message(channel_id, f"Forwarding error: {e}")
 
 
 # ===== HANDLE MESSAGES =====
@@ -234,20 +238,17 @@ async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        await context.bot.restrict_chat_member(
-            chat_id=msg.chat_id,
-            user_id=user.id,
-            permissions=ChatPermissions(
-                can_send_messages=True,
-                can_send_media_messages=True,
-                can_send_polls=True,
-                can_send_other_messages=True,
-                can_add_web_page_previews=True,
-                can_change_info=True,
-                can_invite_users=True,
-                can_pin_messages=True
-            )
+        # Only use supported fields for ChatPermissions
+        permissions = ChatPermissions(
+            can_send_messages=True,
+            can_send_polls=True,
+            can_send_other_messages=True,
+            can_add_web_page_previews=True,
+            can_change_info=True,
+            can_invite_users=True,
+            can_pin_messages=True
         )
+        await context.bot.restrict_chat_member(chat_id=msg.chat_id, user_id=user.id, permissions=permissions)
         await msg.reply_text(f"{user_link(user)} has been unmuted.", parse_mode="HTML")
     except Exception as e:
         await msg.reply_text(f"Failed to unmute: {e}")
@@ -298,3 +299,4 @@ app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
 
 print("Punisher bot with full moderation is running...")
 app.run_polling()
+
