@@ -128,12 +128,19 @@ async def addword(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = " ".join(context.args)
-    with db() as c:
-        users = c.execute("SELECT user_id FROM users").fetchall()
+    msg = " ".join(context.args).strip()
+    if not msg:
+        await update.message.reply_text("Cannot broadcast empty message!")
+        return
 
-    for u in users:
-        await context.bot.send_message(chat_id=u["user_id"], text=msg)
+    data = load_data()
+    for u in data["students"].values():
+        try:
+            await context.bot.send_message(chat_id=u["user_id"], text=msg)
+        except Exception as e:
+            print(f"Failed to send to {u['user_id']}: {e}")
+
+    await update.message.reply_text("Broadcast sent.")
 
 async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -170,4 +177,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
