@@ -1,331 +1,210 @@
-from telegram import Update, ChatPermissions
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
-    MessageHandler,
-    filters,
-    ContextTypes,
     CommandHandler,
-    ChatMemberHandler,
+    ContextTypes,
+    JobQueue,
 )
-import re, time, os, unicodedata
-from datetime import datetime, timedelta
-import pytz
+import os, json, random, asyncio
+from datetime import datetime, time as dt_time, timedelta
 
 # ===== CONFIG =====
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_USER_IDS = {527164608}
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # Or set directly: BOT_TOKEN = "YOUR_TOKEN_HERE"
+ADMIN_USER_IDS = {527164608}  # Replace with your admin ID
 
-LOG_CHANNEL_ID = -1003672042124
-MESSAGES_CHANNEL_ID = -1003299270448
-
-# Spam patterns: keywords + links
-FILTER_PATTERNS = re.compile(
-    r"(spam|advertisement|ad|promo|buy\s*now|free|click\s*here|https?://)", re.IGNORECASE
-)
-
-TEHRAN = pytz.timezone("Asia/Tehran")
-last_user_messages = {}  # {user_id: (text, timestamp)}
+WORDS_FILE = "words.json"
+SUBSCRIPTIONS_FILE = "subscriptions.json"
 
 # ===== HELPERS =====
+def load_json(file_path, default):
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return default
+
+def save_json(file_path, data):
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
 def admin_only(func):
-    async def wrapper(update, context, *args, **kwargs):
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         if not user or user.id not in ADMIN_USER_IDS:
-            if update.message:
-                await update.message.reply_text("You are not allowed to use this command.")
-            elif update.callback_query:
-                await update.callback_query.answer("Not allowed", show_alert=True)
+            await update.message.reply_text("You are not allowed to use this command.")
             return
-        return await func(update, context, *args, **kwargs)
+        return await func(update, context)
     return wrapper
 
-
-def user_link(user):
-    return f'<a href="tg://user?id={user.id}">{user.full_name or "User"}</a>'
-
-def get_user_mention(user):
-    return f"@{user.username}" if user.username else user_link(user)
-
-
-async def log_action(text, context, channel_id=LOG_CHANNEL_ID):
-    try:
-        await context.bot.send_message(chat_id=channel_id, text=text, parse_mode="HTML")
-    except Exception as e:
-        print(f"Logging failed: {e}")
-
-
-# ===== MEDIA FORWARDING =====
-async def forward_media(msg, channel_id, context):
-    """Forward any type of media with mention and caption."""
-    try:
-        # Build mention
-        user_mention = f"@{msg.from_user.username}" if msg.from_user.username else f'<a href="tg://user?id={msg.from_user.id}">{msg.from_user.full_name}</a>'
-        caption = f"{user_mention}: {msg.caption}" if getattr(msg, "caption", None) else user_mention
-
-        # ----- PHOTO -----
-        if msg.photo:
-            # Take largest size
-            file_id = msg.photo[-1].file_id
-            await context.bot.send_photo(chat_id=channel_id, photo=file_id, caption=caption, parse_mode="HTML")
-            return
-        # ----- VIDEO -----
-        if msg.video:
-            await context.bot.send_video(chat_id=channel_id, video=msg.video.file_id, caption=caption, parse_mode="HTML")
-            return
-        # ----- ANIMATION (GIF) -----
-        if msg.animation:
-            await context.bot.send_animation(chat_id=channel_id, animation=msg.animation.file_id, caption=caption, parse_mode="HTML")
-            return
-        # ----- DOCUMENT (PDF, etc.) -----
-        if msg.document:
-            await context.bot.send_document(chat_id=channel_id, document=msg.document.file_id, caption=caption, parse_mode="HTML")
-            return
-        # ----- AUDIO -----
-        if msg.audio:
-            await context.bot.send_audio(chat_id=channel_id, audio=msg.audio.file_id, caption=caption, parse_mode="HTML")
-            return
-        # ----- VOICE -----
-        if msg.voice:
-            await context.bot.send_voice(chat_id=channel_id, voice=msg.voice.file_id, caption=caption, parse_mode="HTML")
-            return
-        # ----- STICKER -----
-        if msg.sticker:
-            await context.bot.send_sticker(chat_id=channel_id, sticker=msg.sticker.file_id)
-            # Send mention separately
-            await context.bot.send_message(chat_id=channel_id, text=user_mention, parse_mode="HTML")
-            return
-
-    except Exception as e:
-        print(f"Media forwarding failed: {e}")
-
-
-# ===== HANDLE MESSAGES =====
-async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if not msg or not msg.from_user:
+# ===== WORD MANAGEMENT =====
+@admin_only
+async def addwords(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 1:
+        await update.message.reply_text("Usage: /addwords <topic>\nThen send words line by line in the next message.")
         return
 
-    # ----- PRIVATE MESSAGE FORWARDING -----
-    if msg.chat.type == "private":
-        # Forward text messages
-        if msg.text and not msg.text.startswith("/"):
-            user_mention = f"@{msg.from_user.username}" if msg.from_user.username else f'<a href="tg://user?id={msg.from_user.id}">{msg.from_user.full_name}</a>'
-            await context.bot.send_message(
-                chat_id=MESSAGES_CHANNEL_ID,
-                text=f"{user_mention}: {msg.text}",
-                parse_mode="HTML"
-            )
+    topic = context.args[0]
+    context.user_data['pending_topic'] = topic
+    await update.message.reply_text(f"Send the words for topic '{topic}', one per line.")
 
-        # Forward media messages
-        if msg.photo or msg.video or msg.animation or msg.document or msg.audio or msg.voice or msg.sticker:
-            await forward_media(msg, MESSAGES_CHANNEL_ID, context)
+async def receive_words(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if 'pending_topic' not in context.user_data:
+        return  # Ignore if not adding words
 
-    # ----- DELETE JOIN / LEAVE MESSAGES -----
-    if msg.new_chat_members or msg.left_chat_member:
-        try:
-            await msg.delete()
-        except:
-            pass
+    topic = context.user_data.pop('pending_topic')
+    new_words = update.message.text.splitlines()
+    words_data = load_json(WORDS_FILE, {})
+    words_data.setdefault(topic, [])
+    for w in new_words:
+        w_clean = w.strip()
+        if w_clean and w_clean not in words_data[topic]:
+            words_data[topic].append(w_clean)
+    save_json(WORDS_FILE, words_data)
+    await update.message.reply_text(f"Added {len(new_words)} words to topic '{topic}'.")
+
+async def listtopics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    words_data = load_json(WORDS_FILE, {})
+    if not words_data:
+        await update.message.reply_text("No topics available.")
         return
+    await update.message.reply_text("Topics:\n" + "\n".join(words_data.keys()))
 
-    # ----- ADVANCED SPAM FILTER -----
-    if msg.chat.type in ("group", "supergroup"):
-        normalized = unicodedata.normalize("NFC", msg.text or "")
-        user_id = msg.from_user.id
-        now = int(time.time())
-
-        # Keyword / link spam
-        if FILTER_PATTERNS.search(normalized):
-            try:
-                await msg.delete()
-            except:
-                pass
-            return
-
-        # Repeated messages
-        last_msg, last_time = last_user_messages.get(user_id, ("", 0))
-        if normalized == last_msg and now - last_time < 10:  # 10s threshold
-            try:
-                await msg.delete()
-            except:
-                pass
-            return
-        last_user_messages[user_id] = (normalized, now)
-
-
-# ===== CHAT MEMBER HANDLER =====
-async def handle_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cm = update.chat_member
-    if not cm or cm.chat.type != "channel":
+async def listwords(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 1:
+        await update.message.reply_text("Usage: /listwords <topic>")
         return
-    if cm.old_chat_member.status in ("left", "kicked") and cm.new_chat_member.status == "member":
-        user = cm.new_chat_member.user
-        await log_action(f"{user_link(user)}, Joined.", context)
+    topic = context.args[0]
+    words_data = load_json(WORDS_FILE, {})
+    if topic not in words_data or not words_data[topic]:
+        await update.message.reply_text(f"No words found for topic '{topic}'.")
+        return
+    await update.message.reply_text(f"Words for '{topic}':\n" + "\n".join(words_data[topic]))
 
+# ===== USER SUBSCRIPTION =====
+async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    subs = load_json(SUBSCRIPTIONS_FILE, {})
+    if user_id in subs:
+        await update.message.reply_text("You are already subscribed.")
+        return
+    subs[user_id] = {"time": "09:00", "topic": None}  # default 9 AM
+    save_json(SUBSCRIPTIONS_FILE, subs)
+    await update.message.reply_text("Subscribed to daily words. Default time is 09:00. Use /settime HH:MM to change.")
 
-# ===== COMMANDS =====
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    subs = load_json(SUBSCRIPTIONS_FILE, {})
+    if user_id in subs:
+        subs.pop(user_id)
+        save_json(SUBSCRIPTIONS_FILE, subs)
+        await update.message.reply_text("Unsubscribed from daily words.")
+    else:
+        await update.message.reply_text("You were not subscribed.")
+
+async def settime(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /settime HH:MM (24-hour)")
+        return
+    t = context.args[0]
     try:
-        await update.message.reply_text("درود! به چنل خودتون خوش اومدید.")
+        datetime.strptime(t, "%H:%M")
     except:
-        pass
+        await update.message.reply_text("Invalid time format. Use HH:MM (24-hour).")
+        return
+    user_id = str(update.effective_user.id)
+    subs = load_json(SUBSCRIPTIONS_FILE, {})
+    if user_id not in subs:
+        await update.message.reply_text("You are not subscribed. Use /subscribe first.")
+        return
+    subs[user_id]["time"] = t
+    save_json(SUBSCRIPTIONS_FILE, subs)
+    await update.message.reply_text(f"Your daily word time is set to {t}.")
 
-async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("@SedAl_Hoseini")
+async def topics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    words_data = load_json(WORDS_FILE, {})
+    if not words_data:
+        await update.message.reply_text("No topics available.")
+        return
+    await update.message.reply_text("Available topics:\n" + "\n".join(words_data.keys()))
 
-async def cmd_userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    user = None
+async def settopic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /settopic <topic>")
+        return
+    topic = context.args[0]
+    words_data = load_json(WORDS_FILE, {})
+    if topic not in words_data:
+        await update.message.reply_text("Topic not found.")
+        return
+    user_id = str(update.effective_user.id)
+    subs = load_json(SUBSCRIPTIONS_FILE, {})
+    if user_id not in subs:
+        await update.message.reply_text("You are not subscribed. Use /subscribe first.")
+        return
+    subs[user_id]["topic"] = topic
+    save_json(SUBSCRIPTIONS_FILE, subs)
+    await update.message.reply_text(f"Your daily word topic is set to '{topic}'.")
 
-    if msg.reply_to_message and msg.reply_to_message.from_user:
-        user = msg.reply_to_message.from_user
-    elif context.args:
-        arg = context.args[0].lstrip("@")
-        try:
-            user = await context.bot.get_chat(arg)
-        except:
-            await msg.reply_text("User not found.")
-            return
+async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    subs = load_json(SUBSCRIPTIONS_FILE, {})
+    if user_id not in subs:
+        await update.message.reply_text("You are not subscribed. Use /subscribe first.")
+        return
+    topic = subs[user_id].get("topic")
+    words_data = load_json(WORDS_FILE, {})
+    if topic:
+        words = words_data.get(topic, [])
     else:
-        user = msg.from_user
-
-    username = f"@{user.username}" if user.username else "None"
-    full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
-
-    text = (
-        f"<b>Name:</b> {full_name}\n"
-        f"<b>Username:</b> {username}\n"
-        f"<b>User ID:</b> <code>{user.id}</code>\n"
-        f"<b>Bot:</b> {'Yes' if user.is_bot else 'No'}"
-    )
-    await msg.reply_text(text, parse_mode="HTML")
-
-
-# ===== GROUP MODERATION =====
-async def resolve_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Resolve user from reply, username, or numeric ID."""
-    msg = update.message
-    user = None
-
-    # 1️⃣ Reply
-    if msg.reply_to_message and msg.reply_to_message.from_user:
-        user = msg.reply_to_message.from_user
-
-    # 2️⃣ Username or ID in args
-    elif context.args:
-        arg = context.args[0]
-        if arg.startswith("@"):
-            arg = arg[1:]
-        try:
-            user = await context.bot.get_chat(arg)
-        except:
-            try:
-                user_id = int(arg)
-                user = await context.bot.get_chat(user_id)
-            except:
-                await msg.reply_text("Cannot find user.")
-                return None
-    else:
-        await msg.reply_text("You must reply to a user or provide username/ID.")
-        return None
-
-    return user
-
-@admin_only
-async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    user = await resolve_user(update, context)
-    if not user:
+        # all words
+        words = [w for ws in words_data.values() for w in ws]
+    if not words:
+        await update.message.reply_text("No words available yet.")
         return
+    await update.message.reply_text(f"Today's word: {random.choice(words)}")
 
-    duration = 3600  # default 1 hour
-    if len(context.args) > 1:
-        try:
-            duration = int(context.args[1])
-        except:
-            pass
+# ===== DAILY SENDING =====
+async def send_daily_words(context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.utcnow()
+    subs = load_json(SUBSCRIPTIONS_FILE, {})
+    words_data = load_json(WORDS_FILE, {})
 
-    try:
-        await context.bot.restrict_chat_member(
-            chat_id=msg.chat_id,
-            user_id=user.id,
-            permissions=ChatPermissions(can_send_messages=False),
-            until_date=datetime.utcnow() + timedelta(seconds=duration)
-        )
-        await msg.reply_text(f"{user_link(user)} muted for {duration} seconds.", parse_mode="HTML")
-    except Exception as e:
-        await msg.reply_text(f"Failed to mute: {e}")
-
-@admin_only
-async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    user = await resolve_user(update, context)
-    if not user:
-        return
-
-    try:
-        # Only use supported fields for ChatPermissions
-        permissions = ChatPermissions(
-            can_send_messages=True,
-            can_send_polls=True,
-            can_send_other_messages=True,
-            can_add_web_page_previews=True,
-            can_change_info=True,
-            can_invite_users=True,
-            can_pin_messages=True
-        )
-        await context.bot.restrict_chat_member(chat_id=msg.chat_id, user_id=user.id, permissions=permissions)
-        await msg.reply_text(f"{user_link(user)} has been unmuted.", parse_mode="HTML")
-    except Exception as e:
-        await msg.reply_text(f"Failed to unmute: {e}")
-
-@admin_only
-async def cmd_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    user = await resolve_user(update, context)
-    if not user:
-        return
-    try:
-        await context.bot.ban_chat_member(chat_id=msg.chat_id, user_id=user.id)
-        await msg.reply_text(f"{user_link(user)} has been banned.", parse_mode="HTML")
-    except Exception as e:
-        await msg.reply_text(f"Failed to ban: {e}")
-
-@admin_only
-async def cmd_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if not context.args:
-        await msg.reply_text("Provide user ID to unban.")
-        return
-    try:
-        user_id = int(context.args[0])
-        await context.bot.unban_chat_member(chat_id=msg.chat_id, user_id=user_id)
-        await msg.reply_text(f"User {user_id} has been unbanned.")
-    except Exception as e:
-        await msg.reply_text(f"Failed to unban: {e}")
-
+    for user_id, data in subs.items():
+        hh, mm = map(int, data.get("time", "09:00").split(":"))
+        # compare UTC time (adjust if needed for your timezone)
+        if now.hour == hh and now.minute == mm:
+            topic = data.get("topic")
+            if topic:
+                words = words_data.get(topic, [])
+            else:
+                words = [w for ws in words_data.values() for w in ws]
+            if words:
+                word = random.choice(words)
+                try:
+                    await context.bot.send_message(chat_id=int(user_id), text=f"Daily word: {word}")
+                except Exception as e:
+                    print(f"Failed to send to {user_id}: {e}")
 
 # ===== APPLICATION =====
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# ---- CHAT MEMBER HANDLER ----
-app.add_handler(ChatMemberHandler(handle_chat_member_update, ChatMemberHandler.CHAT_MEMBER))
+# ---- ADMIN HANDLERS ----
+app.add_handler(CommandHandler("addwords", addwords))
+app.add_handler(CommandHandler("listtopics", listtopics))
+app.add_handler(CommandHandler("listwords", listwords))
+app.add_handler(MessageHandler(None, receive_words))  # catch message for adding words
 
-# ---- COMMAND HANDLERS ----
-app.add_handler(CommandHandler("start", cmd_start))
-app.add_handler(CommandHandler("myid", cmd_myid))
-app.add_handler(CommandHandler("userinfo", cmd_userinfo))
-app.add_handler(CommandHandler("mute", cmd_mute))
-app.add_handler(CommandHandler("unmute", cmd_unmute))
-app.add_handler(CommandHandler("ban", cmd_ban))
-app.add_handler(CommandHandler("unban", cmd_unban))
+# ---- USER HANDLERS ----
+app.add_handler(CommandHandler("subscribe", subscribe))
+app.add_handler(CommandHandler("unsubscribe", unsubscribe))
+app.add_handler(CommandHandler("settime", settime))
+app.add_handler(CommandHandler("topics", topics))
+app.add_handler(CommandHandler("settopic", settopic))
+app.add_handler(CommandHandler("today", today))
 
-# ---- MESSAGE HANDLER ----
-app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
+# ---- JOB QUEUE ----
+job_queue: JobQueue = app.job_queue
+job_queue.run_repeating(send_daily_words, interval=60, first=10)  # check every minute
 
-print("Punisher bot with full moderation is running...")
+print("Daily Word Bot is running...")
 app.run_polling()
-
-
-
-
