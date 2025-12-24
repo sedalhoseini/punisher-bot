@@ -81,7 +81,7 @@ def main_keyboard_bottom(is_admin=False):
         ["📚 List Words"]
     ]
     if is_admin:
-        kb.append(["📦 Bulk Add"])
+        kb.append(["📦 Bulk Add", "📋 List"])
         kb.append(["📣 Broadcast", "🗑 Clear Words"])
     return ReplyKeyboardMarkup(kb, resize_keyboard=True)
 
@@ -93,11 +93,7 @@ def add_word_choice_keyboard():
 
 def list_keyboard_bottom():
     return ReplyKeyboardMarkup(
-        [
-            ["Words", "My Words"],
-            ["🧹 Clear My Words"],
-            ["🏠 Cancel"]
-        ],
+        [["Just Words", "User Words"], ["🏠 Cancel"]],
         resize_keyboard=True
     )
 
@@ -172,6 +168,171 @@ async def main_menu_handler(update, context):
     )
     return ConversationHandler.END
 
+# ================= ADD WORD =================
+async def add_word_choice_handler(update, context):
+    text = update.message.text
+    uid = update.effective_user.id
+
+    if text == "🏠 Cancel":
+        context.user_data.clear()
+        await update.message.reply_text(
+            "Main Menu:",
+            reply_markup=main_keyboard_bottom(uid in ADMIN_IDS)
+        )
+        return ConversationHandler.END
+
+    if text == "Manual":
+        await update.message.reply_text("Send topic:")
+        return 0
+
+    if text == "🤖 AI":
+        await update.message.reply_text("Send the word:")
+        return 7
+
+    return 6
+
+async def manual_add(update, context):
+    fields = ["topic", "level", "word", "definition", "example"]
+    text = update.message.text.strip()
+    for f in fields:
+        if f not in context.user_data:
+            context.user_data[f] = text
+            prompts = {
+                "topic": "Level?",
+                "level": "Word?",
+                "word": "Definition?",
+                "definition": "Example?",
+                "example": "Pronunciation?"
+            }
+            await update.message.reply_text(prompts[f])
+            return fields.index(f) + 1
+    return ConversationHandler.END
+
+async def save_pron(update, context):
+    d = context.user_data
+    uid = update.effective_user.id
+    pron = update.message.text
+
+    with db() as c:
+        if uid in ADMIN_IDS:
+            c.execute(
+                "INSERT INTO words (topic, word, definition, example, pronunciation, level, source) VALUES (?,?,?,?,?,?,?)",
+                (d["topic"], d["word"], d["definition"], d["example"], pron, d["level"], "Manual")
+            )
+        else:
+            c.execute(
+                "INSERT INTO personal_words (user_id, topic, word, definition, example, pronunciation, level, source) VALUES (?,?,?,?,?,?,?,?)",
+                (uid, d["topic"], d["word"], d["definition"], d["example"], pron, d["level"], "Manual")
+            )
+
+    context.user_data.clear()
+    await update.message.reply_text(
+        "Word saved.",
+        reply_markup=main_keyboard_bottom(uid in ADMIN_IDS)
+    )
+    return ConversationHandler.END
+
+async def ai_add(update, context):
+    word = update.message.text.strip()
+    uid = update.effective_user.id
+
+    ai_text = ai_generate_full_word(word)
+    lines = {}
+    for line in ai_text.splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            lines[k.strip()] = v.strip()
+
+    with db() as c:
+        c.execute(
+            "INSERT INTO words (topic, word, definition, example, pronunciation, level, source) VALUES (?,?,?,?,?,?,?)",
+            (
+                lines.get("TOPIC", "General"),
+                lines.get("WORD", word),
+                lines.get("DEFINITION", ""),
+                lines.get("EXAMPLE", ""),
+                lines.get("PRONUNCIATION", ""),
+                lines.get("LEVEL", ""),
+                lines.get("SOURCE", "AI"),
+            )
+        )
+
+    await update.message.reply_text(
+        "AI word added.",
+        reply_markup=main_keyboard_bottom(uid in ADMIN_IDS)
+    )
+    return ConversationHandler.END
+
+# ================= BULK ADD =================
+async def bulk_add_choice(update, context):
+    text = update.message.text
+
+    if text == "🏠 Cancel":
+        await update.message.reply_text(
+            "Main Menu:",
+            reply_markup=main_keyboard_bottom(True)
+        )
+        return ConversationHandler.END
+
+    if text == "Manual":
+        await update.message.reply_text(
+            "Send lines:\ntopic | level | word | definition | example | pronunciation"
+        )
+        return 11
+
+    if text == "🤖 AI":
+        await update.message.reply_text("Send words (one per line):")
+        return 12
+
+    return 10
+
+async def bulk_add_manual(update, context):
+    lines = update.message.text.splitlines()
+    with db() as c:
+        for l in lines:
+            p = [x.strip() for x in l.split("|")]
+            if len(p) == 6:
+                c.execute(
+                    "INSERT INTO words (topic, level, word, definition, example, pronunciation, source) VALUES (?,?,?,?,?,?,?)",
+                    (*p, "Bulk")
+                )
+    await update.message.reply_text(
+        "Bulk manual add done.",
+        reply_markup=main_keyboard_bottom(True)
+    )
+    return ConversationHandler.END
+
+async def bulk_add_ai(update, context):
+    words = [w.strip() for w in update.message.text.splitlines() if w.strip()]
+
+    with db() as c:
+        for word in words:
+            ai_text = ai_generate_full_word(word)
+            lines = {}
+            for line in ai_text.splitlines():
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    lines[k.strip()] = v.strip()
+
+            c.execute(
+                "INSERT INTO words (topic, word, definition, example, pronunciation, level, source) VALUES (?,?,?,?,?,?,?)",
+                (
+                    lines.get("TOPIC", "General"),
+                    lines.get("WORD", word),
+                    lines.get("DEFINITION", ""),
+                    lines.get("EXAMPLE", ""),
+                    lines.get("PRONUNCIATION", ""),
+                    lines.get("LEVEL", ""),
+                    lines.get("SOURCE", "AI"),
+                )
+            )
+
+    await update.message.reply_text(
+        "Bulk AI add done.",
+        reply_markup=main_keyboard_bottom(True)
+    )
+    return ConversationHandler.END
+
 # ================= LIST =================
 async def list_handler(update, context):
     text = update.message.text
@@ -185,30 +346,15 @@ async def list_handler(update, context):
         return ConversationHandler.END
 
     with db() as c:
-        if text == "Words":
-            rows = c.execute(
-                "SELECT word FROM words LIMIT 30"
-            ).fetchall()
+        if text == "Just Words":
+            rows = c.execute("SELECT word FROM words LIMIT 30").fetchall()
             msg = "\n".join(r["word"] for r in rows)
-
-        elif text == "My Words":
+        elif text == "User Words":
             rows = c.execute(
                 "SELECT word FROM personal_words WHERE user_id=? LIMIT 30",
                 (uid,)
             ).fetchall()
             msg = "\n".join(r["word"] for r in rows)
-
-        elif text == "🧹 Clear My Words":
-            c.execute(
-                "DELETE FROM personal_words WHERE user_id=?",
-                (uid,)
-            )
-            await update.message.reply_text(
-                "Your personal words have been cleared.",
-                reply_markup=main_keyboard_bottom(uid in ADMIN_IDS)
-            )
-            return ConversationHandler.END
-
         else:
             msg = "No data."
 
@@ -281,3 +427,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
