@@ -46,7 +46,8 @@ def init_db():
             word TEXT,
             definition TEXT,
             example TEXT,
-            pronunciation TEXT
+            pronunciation TEXT,
+            source TEXT
         );
 
         CREATE TABLE IF NOT EXISTS personal_words (
@@ -57,39 +58,49 @@ def init_db():
             word TEXT,
             definition TEXT,
             example TEXT,
-            pronunciation TEXT
+            pronunciation TEXT,
+            source TEXT
         );
         """)
 
 # ================= AI =================
 def ai_generate_full_word(word: str):
-    prompt = (
-        "You are an English linguist.\n\n"
-        f"For the word: '{word}'\n\n"
-        "Return ALL parts of speech if multiple exist.\n"
-        "STRICT FORMAT REQUIRED:\n"
-        "WORD: ...\n"
-        "LEVEL: A1/A2/B1/B2/C1/C2\n"
-        "TOPIC: ...\n"
-        "DEFINITION: ...\n"
-        "EXAMPLE: ...\n"
-        "PRONUNCIATION: IPA or text\n"
-        "---\n"
-        "(Repeat this block for each part of speech if necessary)"
-    )
+    prompt = f"""
+You are an English linguist. Your task is to collect accurate information about the word '{word}'.
+Follow these rules:
 
+1. Check the following websites in order: 
+   - Cambridge Dictionary
+   - Oxford Learner's Dictionaries
+   - Merriam-Webster
+   - Collins Dictionary
+   - Macmillan Dictionary
+
+2. If the word exists in the first site, take its information. 
+   If not, go to the next site. 
+
+3. STRICT OUTPUT FORMAT:
+WORD: <word>
+LEVEL: <A1/A2/B1/B2/C1/C2>
+TOPIC: <topic>
+DEFINITION: <definition>
+EXAMPLE: <example>
+PRONUNCIATION: <IPA or text>
+SOURCE: <website name used>
+
+Repeat for each part of speech if applicable. Separate each block with '---'.
+"""
     r = client.chat.completions.create(
         model="llama-3.1-8b-instant",
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.3,
+        temperature=0.2,
     )
-
     return r.choices[0].message.content.strip()
 
 # ================= HELPERS =================
 async def send_word(chat, row):
     if not row:
-        await chat.reply_text("No word found.")  # <- fixed
+        await chat.reply_text("No word found.")
         return
 
     text = (
@@ -97,17 +108,18 @@ async def send_word(chat, row):
         f"*Level:* {row['level']}\n"
         f"*Definition:* {row['definition']}\n"
         f"*Example:* {row['example']}\n"
-        f"*Pronunciation:* {row['pronunciation']}"
+        f"*Pronunciation:* {row['pronunciation']}\n"
+        f"*Source:* {row.get('source','N/A')}"
     )
 
-    await chat.reply_text(text, parse_mode="Markdown")  # <- fixed
+    await chat.reply_text(text, parse_mode="Markdown")
 
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     with db() as c:
         c.execute(
-            "INSERT OR IGNORE INTO users (user_id) VALUES (?)",  # <- fixed insert
+            "INSERT OR IGNORE INTO users (user_id, timezone, send_time, last_sent, daily_time) VALUES (?, NULL, NULL, NULL, NULL)",
             (uid,)
         )
     await update.message.reply_text(
@@ -146,20 +158,6 @@ def list_keyboard():
     ADD_PRON, AI_WORD, BULK_ADD, BROADCAST
 ) = range(9)
 
-# ================= START =================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    with db() as c:
-        c.execute(
-            "INSERT OR IGNORE INTO users (user_id, timezone, send_time, last_sent, daily_time) VALUES (?, NULL, NULL, NULL, NULL)",
-            (uid,)
-        )
-    await update.message.reply_text(
-        "Main Menu:",
-        reply_markup=main_keyboard(uid in ADMIN_IDS)
-    )
-    return ConversationHandler.END
-
 # ================= HELPERS =================
 def pick_word(topic=None, level=None):
     with db() as c:
@@ -187,9 +185,43 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = q.from_user.id
     d = q.data
 
-    if d == "pick_word":
-        w = pick_word()
-        await send_word(q.message, w)
+    if d.startswith("my_words"):
+        # Determine page number from callback data
+        try:
+            page = int(d.split("_")[2])
+        except:
+            page = 0
+
+        with db() as c:
+            w = c.execute("SELECT * FROM personal_words WHERE user_id=? ORDER BY id", (uid,)).fetchall()
+
+        if not w:
+            await q.message.reply_text("You have no personal words.")
+        else:
+            page_size = 10
+            start = page * page_size
+            end = start + page_size
+            page_words = w[start:end]
+
+            text = ""
+            for row in page_words:
+                text += (
+                    f"*Word:* {row['word']}\n"
+                    f"*Level:* {row['level']}\n"
+                    f"*Definition:* {row['definition']}\n"
+                    f"*Example:* {row['example']}\n"
+                    f"*Pronunciation:* {row['pronunciation']}\n"
+                    f"*Source:* {row.get('source','N/A')}\n\n"
+                )
+            # Navigation buttons
+            kb = []
+            if start > 0:
+                kb.append(InlineKeyboardButton("⬅ Previous", callback_data=f"my_words_{page-1}"))
+            if end < len(w):
+                kb.append(InlineKeyboardButton("Next ➡", callback_data=f"my_words_{page+1}"))
+            reply_markup = InlineKeyboardMarkup([kb]) if kb else None
+
+            await q.message.edit_text(text.strip(), parse_mode="Markdown", reply_markup=reply_markup)
 
     elif d == "add_manual":
         context.user_data.clear()
@@ -263,8 +295,8 @@ async def save_pron(update, context):
     d = context.user_data
     with db() as c:
         c.execute(
-            "INSERT INTO words VALUES (NULL,?,?,?,?,?,?)",
-            (d["topic"], d["level"], d["word"], d["definition"], d["example"], pron)
+            "INSERT INTO words VALUES (NULL,?,?,?,?,?,?,?)",
+            (d["topic"], d["level"], d["word"], d["definition"], d["example"], pron, "Manual")
         )
     await update.message.reply_text("Word saved.")
     context.user_data.clear()
@@ -301,11 +333,12 @@ async def ai_add(update, context):
             definition = lines.get("DEFINITION", "")
             example = lines.get("EXAMPLE", "")
             pronunciation = lines.get("PRONUNCIATION", "")
+            source = lines.get("SOURCE", "AI")
 
             # Insert into database
             c.execute(
-                "INSERT INTO words VALUES (NULL,?,?,?,?,?,?)",
-                (topic, level, word_val, definition, example, pronunciation)
+                "INSERT INTO words VALUES (NULL,?,?,?,?,?,?,?)",
+                (topic, level, word_val, definition, example, pronunciation, source)
             )
             added_count += 1
 
@@ -320,8 +353,8 @@ async def bulk_add(update, context):
             try:
                 t, lv, w, d, e = l.split("|")
                 c.execute(
-                    "INSERT INTO words VALUES (NULL,?,?,?,?,?,?)",
-                    (t, lv, w, d, e, "")
+                    "INSERT INTO words VALUES (NULL,?,?,?,?,?,?,?)",
+                    (t, lv, w, d, e, "", "Bulk")
                 )
                 ok += 1
             except:
@@ -371,9 +404,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
