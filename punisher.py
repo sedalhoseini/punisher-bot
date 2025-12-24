@@ -81,7 +81,7 @@ def main_keyboard_bottom(is_admin=False):
         ["📚 List Words"]
     ]
     if is_admin:
-        kb.append(["📦 Bulk Add", "📋 List"])
+        kb.append(["📦 Bulk Add"])
         kb.append(["📣 Broadcast", "🗑 Clear Words"])
     return ReplyKeyboardMarkup(kb, resize_keyboard=True)
 
@@ -91,11 +91,17 @@ def add_word_choice_keyboard():
         resize_keyboard=True
     )
 
-def list_keyboard_bottom():
-    return ReplyKeyboardMarkup(
-        [["Words", "My Words", "Clear My Words"], ["🏠 Cancel"]],
-        resize_keyboard=True
-    )
+def list_keyboard_bottom(is_admin=False):
+    if is_admin:
+        return ReplyKeyboardMarkup(
+            [["Public Words", "Personal Words"], ["🏠 Cancel"]],
+            resize_keyboard=True
+        )
+    else:
+        return ReplyKeyboardMarkup(
+            [["Words", "My Words", "Clear My Words"], ["🏠 Cancel"]],
+            resize_keyboard=True
+        )
 
 # ================= HELPERS =================
 async def send_word(chat, row):
@@ -138,7 +144,7 @@ async def main_menu_handler(update, context):
     if text == "📚 List Words":
         await update.message.reply_text(
             "Choose list type:",
-            reply_markup=list_keyboard_bottom()
+            reply_markup=list_keyboard_bottom(uid in ADMIN_IDS)
         )
         return 20
 
@@ -338,34 +344,55 @@ async def list_handler(update, context):
     text = update.message.text
     uid = update.effective_user.id
     username = update.effective_user.username
+    is_admin = uid in ADMIN_IDS
 
     if text == "🏠 Cancel":
         await update.message.reply_text(
             "Main Menu:",
-            reply_markup=main_keyboard_bottom(uid in ADMIN_IDS)
+            reply_markup=main_keyboard_bottom(is_admin)
         )
         return ConversationHandler.END
 
     with db() as c:
-        if text == "Words":
-            rows = c.execute("SELECT word FROM words LIMIT 30").fetchall()
-            msg = "\n".join(r["word"] for r in rows)
-        elif text == "My Words":
-            rows = c.execute(
-                "SELECT word FROM personal_words WHERE user_id=? LIMIT 30",
-                (uid,)
-            ).fetchall()
-            # Show username + word
-            msg = "\n".join(f"@{username}: {r['word']}" for r in rows)
-        elif text == "Clear My Words":
-            c.execute("DELETE FROM personal_words WHERE user_id=?", (uid,))
-            msg = "Your personal words have been cleared."
+        if not is_admin:
+            # USER menu
+            if text == "Words":
+                rows = c.execute("SELECT word FROM words LIMIT 30").fetchall()
+                msg = "\n".join(r["word"] for r in rows)
+            elif text == "My Words":
+                rows = c.execute(
+                    "SELECT word FROM personal_words WHERE user_id=? LIMIT 30",
+                    (uid,)
+                ).fetchall()
+                # User words only, no @username
+                msg = "\n".join(r["word"] for r in rows)
+            elif text == "Clear My Words":
+                c.execute("DELETE FROM personal_words WHERE user_id=?", (uid,))
+                msg = "Your personal words have been cleared."
+            else:
+                msg = "No data."
         else:
-            msg = "No data."
+            # ADMIN menu
+            if text == "Public Words":
+                rows = c.execute(
+                    "SELECT * FROM words ORDER BY topic, level, id LIMIT 50"
+                ).fetchall()
+                msg = "\n".join(
+                    f"{r['topic']} | {r['level']} | {r['word']}" for r in rows
+                )
+            elif text == "Personal Words":
+                rows = c.execute(
+                    "SELECT pw.word, u.username FROM personal_words pw "
+                    "JOIN users u ON pw.user_id=u.user_id "
+                    "ORDER BY u.username, pw.id LIMIT 50"
+                ).fetchall()
+                msg = "\n".join(f"@{r['username']}: {r['word']}" for r in rows)
+            else:
+                msg = "No data."
 
     await update.message.reply_text(
         msg or "No words found.",
-        reply_markup=main_keyboard_bottom(uid in ADMIN_IDS)
+        reply_markup=main_keyboard_bottom(is_admin)
     )
     return ConversationHandler.END
 
@@ -432,5 +459,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
