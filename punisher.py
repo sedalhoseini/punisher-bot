@@ -51,14 +51,25 @@ def init_db():
             level TEXT,
             source TEXT
         );
+        CREATE TABLE IF NOT EXISTS sent_words (
+            user_id INTEGER,
+            word_id INTEGER,
+            PRIMARY KEY (user_id, word_id)
+        );
         """)
 
 # ================= AI =================
 def ai_generate_full_word(word: str):
     prompt = f"""
-You are an English linguist. Provide accurate info for '{word}'.
-STRICT FORMAT:
+You are an English linguist.
+
+If the word has multiple parts of speech (noun, verb, adjective, etc),
+OUTPUT EACH AS A SEPARATE BLOCK.
+
+STRICT FORMAT — REPEAT BLOCKS IF NEEDED:
+
 WORD:
+PART_OF_SPEECH:
 LEVEL:
 TOPIC:
 DEFINITION:
@@ -78,8 +89,13 @@ SOURCE:
 def main_keyboard_bottom(is_admin=False):
     kb = [
         ["🎯 Get Word", "➕ Add Word"],
-        ["📚 List Words"]
+        ["📚 List Words", "⏰ Daily Words"]
     ]
+    if text == "⏰ Daily Words":
+    await update.message.reply_text(
+        "Send format:\ncount | time(HH:MM) | level(optional) | pos(optional)\nExample:\n3 | 08:30 | B2 | noun"
+    )
+    return 30
     if is_admin:
         kb.append(["📦 Bulk Add"])
         kb.append(["📣 Broadcast", "🗑 Clear Words"])
@@ -118,11 +134,26 @@ async def send_word(chat, row):
     )
     await chat.reply_text(text, parse_mode="Markdown")
 
-def pick_word_from_db():
+def pick_word_for_user(user_id):
     with db() as c:
-        return c.execute(
-            "SELECT * FROM words ORDER BY RANDOM() LIMIT 1"
-        ).fetchone()
+        row = c.execute("""
+            SELECT * FROM words
+            WHERE id NOT IN (
+                SELECT word_id FROM sent_words WHERE user_id=?
+            )
+            ORDER BY RANDOM()
+            LIMIT 1
+        """, (user_id,)).fetchone()
+
+        if not row:
+            c.execute("DELETE FROM sent_words WHERE user_id=?", (user_id,))
+            return pick_word_for_user(user_id)
+
+        c.execute(
+            "INSERT OR IGNORE INTO sent_words (user_id, word_id) VALUES (?,?)",
+            (user_id, row["id"])
+        )
+        return row
 
 # ================= MAIN MENU =================
 async def main_menu_handler(update, context):
@@ -130,7 +161,7 @@ async def main_menu_handler(update, context):
     uid = update.effective_user.id
 
     if text == "🎯 Get Word":
-        await send_word(update.message, pick_word_from_db())
+        await send_word(update.message, pick_word_for_user(uid))
         return ConversationHandler.END
 
     if text == "➕ Add Word":
@@ -141,6 +172,13 @@ async def main_menu_handler(update, context):
         )
         return 6
 
+    if text == "⏰ Daily Words":
+    await update.message.reply_text(
+        "Send in this format:\n"
+        "count | time(HH:MM) | level(optional) | part-of-speech(optional)\n\n"
+        "Example:\n3 | 08:30 | B2 | noun"
+    )
+    return 30
     if text == "📚 List Words":
         await update.message.reply_text(
             "Choose list type:",
@@ -239,32 +277,39 @@ async def save_pron(update, context):
     return ConversationHandler.END
 
 async def ai_add(update, context):
-    word = update.message.text.strip()
     uid = update.effective_user.id
+    text = ai_generate_full_word(update.message.text.strip())
 
-    ai_text = ai_generate_full_word(word)
-    lines = {}
-    for line in ai_text.splitlines():
-        if ":" in line:
-            k, v = line.split(":", 1)
-            lines[k.strip()] = v.strip()
+    blocks = text.split("---")
+    inserted = 0
 
     with db() as c:
-        c.execute(
-            "INSERT INTO words (topic, word, definition, example, pronunciation, level, source) VALUES (?,?,?,?,?,?,?)",
-            (
-                lines.get("TOPIC", "General"),
-                lines.get("WORD", word),
-                lines.get("DEFINITION", ""),
-                lines.get("EXAMPLE", ""),
-                lines.get("PRONUNCIATION", ""),
-                lines.get("LEVEL", ""),
-                lines.get("SOURCE", "AI"),
+        for block in blocks:
+            lines = {}
+            for line in block.splitlines():
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    lines[k.strip()] = v.strip()
+
+            if "WORD" not in lines:
+                continue
+
+            c.execute(
+                "INSERT INTO words (topic, word, definition, example, pronunciation, level, source) VALUES (?,?,?,?,?,?,?)",
+                (
+                    lines.get("TOPIC", "General"),
+                    f"{lines.get('WORD')} ({lines.get('PART_OF_SPEECH','')})",
+                    lines.get("DEFINITION", ""),
+                    lines.get("EXAMPLE", ""),
+                    lines.get("PRONUNCIATION", ""),
+                    lines.get("LEVEL", ""),
+                    "AI",
+                )
             )
-        )
+            inserted += 1
 
     await update.message.reply_text(
-        "AI word added.",
+        f"{inserted} word entries added.",
         reply_markup=main_keyboard_bottom(uid in ADMIN_IDS)
     )
     return ConversationHandler.END
@@ -357,8 +402,11 @@ async def list_handler(update, context):
         if not is_admin:
             # USER menu
             if text == "Words":
-                rows = c.execute("SELECT word FROM words LIMIT 30").fetchall()
-                msg = "\n".join(r["word"] for r in rows)
+                rows = c.execute(
+                    "SELECT topic, level, word FROM words ORDER BY topic, level LIMIT 30"
+                ).fetchall()
+                msg = "\n".join(f"{r['topic']} | {r['level']} | {r['word']}" for r in rows)
+
             elif text == "My Words":
                 rows = c.execute(
                     "SELECT word FROM personal_words WHERE user_id=? LIMIT 30",
@@ -426,11 +474,80 @@ async def start(update, context):
     )
     return ConversationHandler.END
 
+# ============== Daily Config ==============
+async def daily_config(update, context):
+    uid = update.effective_user.id
+    text = update.message.text
+
+    try:
+        parts = [p.strip() for p in text.split("|")]
+        count = int(parts[0])
+        time = parts[1]
+
+        level = parts[2] if len(parts) > 2 else None
+        pos = parts[3] if len(parts) > 3 else None
+    except:
+        await update.message.reply_text(
+            "Invalid format.\nExample:\n3 | 08:30 | B2 | noun"
+        )
+        return 30
+
+    with db() as c:
+        c.execute("""
+            UPDATE users SET
+                daily_enabled = 1,
+                daily_count = ?,
+                daily_time = ?,
+                daily_level = ?,
+                daily_pos = ?
+            WHERE user_id = ?
+        """, (count, time, level, pos, uid))
+
+    await update.message.reply_text(
+        "Daily words activated.",
+        reply_markup=main_keyboard_bottom(uid in ADMIN_IDS)
+    )
+    return ConversationHandler.END
+
+# ============== Daily Words ==============
+async def send_daily_words(context):
+    now = datetime.now().strftime("%H:%M")
+
+    with db() as c:
+        users = c.execute("""
+            SELECT * FROM users
+            WHERE daily_enabled = 1
+              AND daily_time = ?
+        """, (now,)).fetchall()
+
+    for u in users:
+        for _ in range(u["daily_count"]):
+            word = pick_word_for_user(u["user_id"])
+            if not word:
+                continue
+
+            text = (
+                f"*{word['word']}*\n"
+                f"{word['definition']}\n"
+                f"_Level: {word['level']}_"
+            )
+
+            try:
+                await context.bot.send_message(
+                    chat_id=u["user_id"],
+                    text=text,
+                    parse_mode="Markdown"
+                )
+            except:
+                pass
+
 # ================= MAIN =================
 def main():
     init_db()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    app.job_queue.run_repeating(send_daily_words, interval=60, first=10)
+    
     conv = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
@@ -450,6 +567,7 @@ def main():
             11: [MessageHandler(filters.TEXT & ~filters.COMMAND, bulk_add_manual)],
             12: [MessageHandler(filters.TEXT & ~filters.COMMAND, bulk_add_ai)],
             20: [MessageHandler(filters.TEXT & ~filters.COMMAND, list_handler)],
+            30: [MessageHandler(filters.TEXT & ~filters.COMMAND, daily_config)],
         },
         fallbacks=[]
     )
@@ -459,6 +577,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
