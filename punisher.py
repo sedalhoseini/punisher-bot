@@ -96,10 +96,10 @@ def main_keyboard_bottom(is_admin=False):
         kb.append(["📣 Broadcast", "🗑 Clear Words"])
     return ReplyKeyboardMarkup(kb, resize_keyboard=True)
     if text == "⏰ Daily Words":
-    await update.message.reply_text(
-        "Send format:\ncount | time(HH:MM) | level(optional) | pos(optional)\nExample:\n3 | 08:30 | B2 | noun"
-    )
-    return 30
+        await update.message.reply_text(
+            "Send format:\ncount | time(HH:MM) | level(optional) | pos(optional)\nExample:\n3 | 08:30 | B2 | noun"
+        )
+        return 30
 def add_word_choice_keyboard():
     return ReplyKeyboardMarkup(
         [["Manual", "🤖 AI"], ["🏠 Cancel"]],
@@ -576,6 +576,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
