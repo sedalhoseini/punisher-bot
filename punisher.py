@@ -1,6 +1,7 @@
 import os
 import sqlite3
 from datetime import datetime
+import pytz
 from groq import Groq
 from telegram import Update, ReplyKeyboardMarkup
 import requests
@@ -9,6 +10,12 @@ from telegram.ext import (
     ApplicationBuilder, ContextTypes, CommandHandler,
     CallbackQueryHandler, ConversationHandler, MessageHandler, filters
 )
+
+# ================= DAILY STATES =================
+DAILY_COUNT = 31
+DAILY_TIME = 32
+DAILY_LEVEL = 33
+DAILY_POS = 34
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -290,17 +297,26 @@ async def send_word(chat, row):
 def pick_word_for_user(user_id):
     with db() as c:
         row = c.execute("""
-            SELECT * FROM words
-            WHERE id NOT IN (
-                SELECT word_id FROM sent_words WHERE user_id=?
-            )
+            SELECT w.*
+            FROM words w
+            LEFT JOIN sent_words s
+              ON w.id = s.word_id AND s.user_id = ?
+            WHERE s.word_id IS NULL
             ORDER BY RANDOM()
             LIMIT 1
         """, (user_id,)).fetchone()
 
         if not row:
+            # Reset sent words if all words were already sent
             c.execute("DELETE FROM sent_words WHERE user_id=?", (user_id,))
-            return pick_word_for_user(user_id)
+            row = c.execute("""
+                SELECT w.*
+                FROM words w
+                ORDER BY RANDOM()
+                LIMIT 1
+            """).fetchone()
+            if not row:
+                return None
 
         c.execute(
             "INSERT OR IGNORE INTO sent_words (user_id, word_id) VALUES (?,?)",
@@ -326,12 +342,9 @@ async def main_menu_handler(update, context):
         return 6
 
     if text == "⏰ Daily Words":
-        await update.message.reply_text(
-            "Send in this format:\n"
-            "count | time(HH:MM) | level(optional) | part-of-speech(optional)\n\n"
-            "Example:\n3 | 08:30 | B2 | noun"
-        )
-        return 30
+        context.user_data.clear()
+        await update.message.reply_text("How many words per day?")
+        return DAILY_COUNT  # new state for daily_count
         
     if text == "📚 List Words":
         await update.message.reply_text(
@@ -362,6 +375,75 @@ async def main_menu_handler(update, context):
 
     await update.message.reply_text(
         "Main Menu:",
+        reply_markup=main_keyboard_bottom(uid in ADMIN_IDS)
+    )
+    return ConversationHandler.END
+
+# Step 1 — How many words
+async def daily_count_handler(update, context):
+    try:
+        context.user_data["daily_count"] = int(update.message.text)
+    except:
+        await update.message.reply_text("Please enter a valid number.")
+        return DAILY_COUNT
+    await update.message.reply_text("What time should I send the words? (HH:MM)")
+    return DAILY_TIME
+
+# Step 2 — Time
+async def daily_time_handler(update, context):
+    context.user_data["daily_time"] = update.message.text.strip()
+    keyboard = ReplyKeyboardMarkup(
+        [["A1","A2","B1"],["B2","C1"],["Skip"]],
+        resize_keyboard=True
+    )
+    await update.message.reply_text("Choose level (optional):", reply_markup=keyboard)
+    return DAILY_LEVEL
+
+# Step 3 — Level
+async def daily_level_handler(update, context):
+    level = update.message.text
+    if level != "Skip":
+        context.user_data["daily_level"] = level
+    else:
+        context.user_data["daily_level"] = None
+    keyboard = ReplyKeyboardMarkup(
+        [["noun","verb"],["adjective","adverb"],["Skip"]],
+        resize_keyboard=True
+    )
+    await update.message.reply_text("Choose part of speech (optional):", reply_markup=keyboard)
+    return DAILY_POS
+
+# Step 4 — Part of speech + save
+async def daily_pos_handler(update, context):
+    pos = update.message.text
+    if pos != "Skip":
+        context.user_data["daily_pos"] = pos
+    else:
+        context.user_data["daily_pos"] = None
+
+    uid = update.effective_user.id
+    with db() as c:
+        c.execute("""
+            INSERT INTO users (user_id, daily_enabled, daily_count, daily_time, daily_level, daily_pos)
+            VALUES (?,1,?,?,?,?,?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                daily_enabled=1,
+                daily_count=excluded.daily_count,
+                daily_time=excluded.daily_time,
+                daily_level=excluded.daily_level,
+                daily_pos=excluded.daily_pos
+        """, (
+            uid,
+            context.user_data["daily_count"],
+            context.user_data["daily_time"],
+            context.user_data.get("daily_level"),
+            context.user_data.get("daily_pos"),
+        ))
+
+
+    context.user_data.clear()
+    await update.message.reply_text(
+        "Daily words activated.",
         reply_markup=main_keyboard_bottom(uid in ADMIN_IDS)
     )
     return ConversationHandler.END
@@ -438,18 +520,35 @@ async def ai_add(update, context):
     data = ai_fill_missing(data)
 
     with db() as c:
-        c.execute(
-            "INSERT INTO words (topic, word, definition, example, pronunciation, level, source) VALUES (?,?,?,?,?,?,?)",
-            (
-                "General",
-                f"{data['word']} ({data['parts']})",
-                data["definition"],
-                data["example"],
-                data["pronunciation"],
-                data["level"],
-                data["source"],
+        if uid in ADMIN_IDS:
+            # Admins → public words
+            c.execute(
+                "INSERT INTO words (topic, word, definition, example, pronunciation, level, source) VALUES (?,?,?,?,?,?,?)",
+                (
+                    "General",
+                    f"{data['word']} ({data['parts']})",
+                    data["definition"],
+                    data["example"],
+                    data["pronunciation"],
+                    data["level"],
+                    data["source"],
+                )
             )
-        )
+        else:
+            # Users → personal words
+            c.execute(
+                "INSERT INTO personal_words (user_id, topic, word, definition, example, pronunciation, level, source) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    uid,
+                    "General",
+                    f"{data['word']} ({data['parts']})",
+                    data["definition"],
+                    data["example"],
+                    data["pronunciation"],
+                    data["level"],
+                    data["source"],
+                )
+            )
 
     await update.message.reply_text(
         "Word added (Dictionary + AI).",
@@ -613,44 +712,10 @@ async def start(update, context):
     )
     return ConversationHandler.END
 
-# ============== Daily Config ==============
-async def daily_config(update, context):
-    uid = update.effective_user.id
-    text = update.message.text
-
-    try:
-        parts = [p.strip() for p in text.split("|")]
-        count = int(parts[0])
-        time = parts[1]
-
-        level = parts[2] if len(parts) > 2 else None
-        pos = parts[3] if len(parts) > 3 else None
-    except:
-        await update.message.reply_text(
-            "Invalid format.\nExample:\n3 | 08:30 | B2 | noun"
-        )
-        return 30
-
-    with db() as c:
-        c.execute("""
-            UPDATE users SET
-                daily_enabled = 1,
-                daily_count = ?,
-                daily_time = ?,
-                daily_level = ?,
-                daily_pos = ?
-            WHERE user_id = ?
-        """, (count, time, level, pos, uid))
-
-    await update.message.reply_text(
-        "Daily words activated.",
-        reply_markup=main_keyboard_bottom(uid in ADMIN_IDS)
-    )
-    return ConversationHandler.END
-
 # ============== Daily Words ==============
 async def send_daily_words(context):
-    now = datetime.now().strftime("%H:%M")
+    tehran = pytz.timezone("Asia/Tehran")
+    now = datetime.now(tehran).strftime("%H:%M")
 
     with db() as c:
         users = c.execute("""
@@ -686,7 +751,7 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.job_queue.run_repeating(send_daily_words, interval=60, first=10)
-    
+
     conv = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
@@ -706,7 +771,12 @@ def main():
             11: [MessageHandler(filters.TEXT & ~filters.COMMAND, bulk_add_manual)],
             12: [MessageHandler(filters.TEXT & ~filters.COMMAND, bulk_add_ai)],
             20: [MessageHandler(filters.TEXT & ~filters.COMMAND, list_handler)],
-            30: [MessageHandler(filters.TEXT & ~filters.COMMAND, daily_config)],
+            
+            DAILY_COUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, daily_count_handler)],
+            DAILY_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, daily_time_handler)],
+            DAILY_LEVEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, daily_level_handler)],
+            DAILY_POS: [MessageHandler(filters.TEXT & ~filters.COMMAND, daily_pos_handler)],
+
         },
         fallbacks=[]
     )
@@ -716,15 +786,5 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
 
 
