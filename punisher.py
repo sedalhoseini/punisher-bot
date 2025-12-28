@@ -3,6 +3,8 @@ import sqlite3
 from datetime import datetime
 from groq import Groq
 from telegram import Update, ReplyKeyboardMarkup
+import requests
+from bs4 import BeautifulSoup
 from telegram.ext import (
     ApplicationBuilder, ContextTypes, CommandHandler,
     CallbackQueryHandler, ConversationHandler, MessageHandler, filters
@@ -15,6 +17,9 @@ ADMIN_IDS = {527164608}
 DB_PATH = "/opt/punisher-bot/db/daily_words.db"
 
 client = Groq(api_key=GROQ_API_KEY)
+HEADERS = {
+    "User-Agent": "Mozilla/5.0"
+}
 
 # ================= DATABASE =================
 def db():
@@ -58,6 +63,119 @@ def init_db():
         );
         """)
 
+# ============= Above AI =============
+def empty_word_data(word):
+    return {
+        "word": word,
+        "parts": None,
+        "level": None,
+        "definition": None,
+        "example": None,
+        "pronunciation": None,
+        "source": None,
+    }
+
+
+def scrape_cambridge(word):
+    url = f"https://dictionary.cambridge.org/dictionary/english/{word}"
+    r = requests.get(url, headers=HEADERS)
+    if r.status_code != 200:
+        return None
+
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    try:
+        data = empty_word_data(word)
+
+        pos = soup.select_one(".pos.dpos")
+        if pos:
+            data["parts"] = pos.text.strip()
+
+        level = soup.select_one(".epp-xref")
+        if level:
+            data["level"] = level.text.strip()
+
+        definition = soup.select_one(".def.ddef_d")
+        if definition:
+            data["definition"] = definition.text.strip()
+
+        example = soup.select_one(".examp.dexamp")
+        if example:
+            data["example"] = example.text.strip()
+
+        pron = soup.select_one(".ipa")
+        if pron:
+            data["pronunciation"] = pron.text.strip()
+
+        data["source"] = "Cambridge"
+        return data
+
+    except:
+        return None
+
+
+def scrape_webster(word):
+    url = f"https://www.merriam-webster.com/dictionary/{word}"
+    r = requests.get(url, headers=HEADERS)
+    if r.status_code != 200:
+        return None
+
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    try:
+        data = empty_word_data(word)
+
+        pos = soup.select_one(".important-blue-link")
+        if pos:
+            data["parts"] = pos.text.strip()
+
+        definition = soup.select_one(".sense.has-sn")
+        if definition:
+            data["definition"] = definition.text.strip()
+
+        example = soup.select_one(".ex-sent")
+        if example:
+            data["example"] = example.text.strip()
+
+        pron = soup.select_one(".pr")
+        if pron:
+            data["pronunciation"] = pron.text.strip()
+
+        data["source"] = "Merriam-Webster"
+        return data
+
+    except:
+        return None
+
+
+def scrape_oxford(word):
+    return None
+
+
+def scrape_collins(word):
+    return None
+
+
+def scrape_longman(word):
+    return None
+
+
+SCRAPERS = [
+    scrape_cambridge,
+    scrape_oxford,
+    scrape_webster,
+    scrape_collins,
+    scrape_longman,
+]
+
+
+def get_word_from_web(word):
+    for scraper in SCRAPERS:
+        data = scraper(word)
+        if data and any(data.values()):
+            return data
+    return empty_word_data(word)
+
 # ================= AI =================
 def ai_generate_full_word(word: str):
     prompt = f"""
@@ -86,6 +204,38 @@ SOURCE:
         temperature=0.2,
     )
     return r.choices[0].message.content.strip()
+
+# ============= AI fill missing =============
+def ai_fill_missing(data):
+    missing = [k for k, v in data.items() if v is None]
+
+    if not missing:
+        return data
+
+    prompt = f"""
+Fill ONLY missing fields for this word.
+Do not change existing data.
+
+Word: {data['word']}
+Current data: {data}
+
+Return only key:value lines.
+"""
+
+    r = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
+    )
+
+    for line in r.choices[0].message.content.splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            k = k.strip()
+            if k in data and data[k] is None:
+                data[k] = v.strip()
+
+    return data
 
 # ================= KEYBOARDS =================
 def main_keyboard_bottom(is_admin=False):
@@ -277,38 +427,27 @@ async def save_pron(update, context):
 
 async def ai_add(update, context):
     uid = update.effective_user.id
-    text = ai_generate_full_word(update.message.text.strip())
+    word = update.message.text.strip()
 
-    blocks = text.split("---")
-    inserted = 0
+    data = get_word_from_web(word)
+    data = ai_fill_missing(data)
 
     with db() as c:
-        for block in blocks:
-            lines = {}
-            for line in block.splitlines():
-                if ":" in line:
-                    k, v = line.split(":", 1)
-                    lines[k.strip()] = v.strip()
-
-            if "WORD" not in lines:
-                continue
-
-            c.execute(
-                "INSERT INTO words (topic, word, definition, example, pronunciation, level, source) VALUES (?,?,?,?,?,?,?)",
-                (
-                    lines.get("TOPIC", "General"),
-                    f"{lines.get('WORD')} ({lines.get('PART_OF_SPEECH','')})",
-                    lines.get("DEFINITION", ""),
-                    lines.get("EXAMPLE", ""),
-                    lines.get("PRONUNCIATION", ""),
-                    lines.get("LEVEL", ""),
-                    "AI",
-                )
+        c.execute(
+            "INSERT INTO words (topic, word, definition, example, pronunciation, level, source) VALUES (?,?,?,?,?,?,?)",
+            (
+                "General",
+                f"{data['word']} ({data['parts']})",
+                data["definition"],
+                data["example"],
+                data["pronunciation"],
+                data["level"],
+                data["source"],
             )
-            inserted += 1
+        )
 
     await update.message.reply_text(
-        f"{inserted} word entries added.",
+        "Word added (Dictionary + AI).",
         reply_markup=main_keyboard_bottom(uid in ADMIN_IDS)
     )
     return ConversationHandler.END
@@ -576,6 +715,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
