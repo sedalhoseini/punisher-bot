@@ -1,7 +1,7 @@
 import os
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, time
 import pytz
 from groq import Groq
 from telegram import Update, ReplyKeyboardMarkup
@@ -764,6 +764,47 @@ async def start(update, context):
     )
     return ConversationHandler.END
 
+# ============== Auto Backup ==============
+async def auto_backup(context):
+    # Create filename with timestamp
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    filename = f"backup_auto_{timestamp}.db"
+
+    # Send backup to ALL Admins
+    for admin_id in ADMIN_IDS:
+        try:
+            with open(DB_PATH, 'rb') as f:
+                await context.bot.send_document(
+                    chat_id=admin_id,
+                    document=f,
+                    filename=filename,
+                    caption=f"🌙 **Nightly Backup**\n📅 {timestamp}\n🛡 System Auto-Save",
+                    parse_mode="Markdown"
+                )
+        except Exception as e:
+            # Fixed the missing parenthesis here:
+            print(f"❌ Auto-backup failed for {admin_id}: {e}")
+
+# ================= MANUAL BACKUP COMMAND =================
+async def backup_command(update, context):
+    uid = update.effective_user.id
+    if uid not in ADMIN_IDS:
+        return  # Ignore non-admins
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    filename = f"backup_manual_{timestamp}.db"
+
+    try:
+        with open(DB_PATH, 'rb') as f:
+            await update.message.reply_document(
+                document=f,
+                filename=filename,
+                caption=f"📦 **Manual Backup**\n📅 {timestamp}\n🛡 Safe and sound!",
+                parse_mode="Markdown"
+            )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Backup failed: {e}") 
+            
 # ============== Daily Words ==============
 async def send_daily_words(context):
     tehran = pytz.timezone("Asia/Tehran")
@@ -804,10 +845,21 @@ def main():
 
     app.job_queue.run_repeating(send_daily_words, interval=60, first=10)
 
+    # Define your timezone (Tehran is what you used before)
+    tehran_tz = pytz.timezone("Asia/Tehran")
+    
+    # Set time to 00:00 (Midnight)
+    midnight_time = time(hour=0, minute=0, second=0, tzinfo=tehran_tz)
+
+    # Schedule the job
+    app.job_queue.run_daily(auto_backup, time=midnight_time)
+    
+    # ... (rest of your code) ...
     conv = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
             CommandHandler("version", version_command),
+            CommandHandler("backup", backup_command),
             MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_handler)
         ],
         states={
@@ -848,6 +900,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
