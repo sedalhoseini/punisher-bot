@@ -1,7 +1,7 @@
 import os
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, time
 import pytz
 from groq import Groq
 from telegram import Update, ReplyKeyboardMarkup
@@ -12,6 +12,13 @@ from telegram.ext import (
     CallbackQueryHandler, ConversationHandler, MessageHandler, filters
 )
 
+# ================= VERSION INFO =================
+BOT_VERSION = "0.1.0"
+VERSION_DATE = "2026-01-04"
+CHANGELOG = """
+• Initial Beta Release for Students
+• Added Daily Words & AI Dictionary
+"""
 # ================= DAILY STATES =================
 DAILY_COUNT = 31
 DAILY_TIME = 32
@@ -290,13 +297,31 @@ def list_keyboard_bottom(is_admin=False):
         )
 
 # ================= HELPERS =================
+async def version_command(update, context):
+    text = (
+        f"🤖 *Lingo Bot v{BOT_VERSION}*\n"
+        f"📅 _Last Updated: {VERSION_DATE}_\n\n"
+        f"📝 *What's New:*\n{CHANGELOG}"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
 async def send_word(chat, row):
     if not row:
         await chat.reply_text("No word found.")
         return
+    
+    # Check if the word contains brackets like "word (noun)"
+    word_text = row['word']
+    if '(' in word_text and ')' in word_text:
+        part_of_speech = word_text.split('(')[-1].replace(')', '')
+        display_word = word_text.split('(')[0].strip()
+    else:
+        part_of_speech = "Not specified"
+        display_word = word_text
+
     text = (
-        f"Word: {row['word']}\n"
-        f"Part of Speech: {row['word'].split('(')[-1].replace(')', '')}\n"
+        f"Word: {display_word}\n"
+        f"Part of Speech: {part_of_speech}\n"
         f"Level: {row['level']}\n"
         f"Definition: {row['definition']}\n"
         f"Example: {row['example']}\n"
@@ -355,8 +380,8 @@ async def main_menu_handler(update, context):
     if text == "⏰ Daily Words":
         context.user_data.clear()
         await update.message.reply_text("How many words per day?")
-        return DAILY_COUNT  # new state for daily_count
-        
+        return DAILY_COUNT
+
     if text == "📚 List Words":
         await update.message.reply_text(
             "Choose list type:",
@@ -749,6 +774,54 @@ async def start(update, context):
     )
     return ConversationHandler.END
 
+# ============== Auto Backup ==============
+async def auto_backup(context):
+    now = datetime.now()
+    # 1. Format for Filename (Uses _ which is safe for files)
+    ts_file = now.strftime("%Y-%m-%d_%H-%M")
+    # 2. Format for Chat Caption (Uses space to avoid crashing Markdown)
+    ts_text = now.strftime("%Y-%m-%d %H:%M")
+    
+    filename = f"backup_auto_{ts_file}.db"
+
+    # Send backup to ALL Admins
+    for admin_id in ADMIN_IDS:
+        try:
+            with open(DB_PATH, 'rb') as f:
+                await context.bot.send_document(
+                    chat_id=admin_id,
+                    document=f,
+                    filename=filename,
+                    # We use single * for bold in standard Markdown, and ts_text (no underscores)
+                    caption=f"🌙 *Nightly Backup*\n📅 {ts_text}\n🛡 System Auto-Save",
+                    parse_mode="Markdown"
+                )
+        except Exception as e:
+            print(f"❌ Auto-backup failed for {admin_id}: {e}")
+
+# ================= MANUAL BACKUP COMMAND =================
+async def backup_command(update, context):
+    uid = update.effective_user.id
+    if uid not in ADMIN_IDS:
+        return  # Ignore non-admins
+
+    now = datetime.now()
+    ts_file = now.strftime("%Y-%m-%d_%H-%M")
+    ts_text = now.strftime("%Y-%m-%d %H:%M")
+    
+    filename = f"backup_manual_{ts_file}.db"
+
+    try:
+        with open(DB_PATH, 'rb') as f:
+            await update.message.reply_document(
+                document=f,
+                filename=filename,
+                caption=f"📦 *Manual Backup*\n📅 {ts_text}\n🛡 Safe and sound!",
+                parse_mode="Markdown"
+            )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Backup failed: {e}")
+
 # ============== Daily Words ==============
 async def send_daily_words(context):
     tehran = pytz.timezone("Asia/Tehran")
@@ -767,8 +840,15 @@ async def send_daily_words(context):
             if not word:
                 continue
 
+            # Safer formatting for daily words
+            word_text = word['word']
+            if '(' in word_text and ')' in word_text:
+                display_word = word_text.split('(')[0].strip()
+            else:
+                display_word = word_text
+
             text = (
-                f"*{word['word']}*\n"
+                f"*{display_word}*\n"
                 f"{word['definition']}\n"
                 f"_Level: {word['level']}_"
             )
@@ -789,9 +869,20 @@ def main():
 
     app.job_queue.run_repeating(send_daily_words, interval=60, first=10)
 
+    # Define your timezone (Tehran is what you used before)
+    tehran_tz = pytz.timezone("Asia/Tehran")
+    
+    # Set time to 00:00 (Midnight)
+    midnight_time = time(hour=0, minute=0, second=0, tzinfo=tehran_tz)
+
+    # Schedule the job
+    app.job_queue.run_daily(auto_backup, time=midnight_time)
+    
     conv = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
+            CommandHandler("version", version_command),
+            CommandHandler("backup", backup_command),
             MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_handler)
         ],
         states={
@@ -832,9 +923,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
 
