@@ -12,6 +12,15 @@ from telegram.ext import (
     CallbackQueryHandler, ConversationHandler, MessageHandler, filters
 )
 
+# ================= VERSION INFO =================
+# Change these lines whenever you update the bot!
+BOT_VERSION = "1.0.1"
+VERSION_DATE = "2026-01-04"
+CHANGELOG = """
+• Renamed bot to Lingo Bot
+• Fixed database crash issues
+• Added Version command
+"""
 # ================= DAILY STATES =================
 DAILY_COUNT = 31
 DAILY_TIME = 32
@@ -290,6 +299,14 @@ def list_keyboard_bottom(is_admin=False):
         )
 
 # ================= HELPERS =================
+async def version_command(update, context):
+    text = (
+        f"🤖 *Lingo Bot v{BOT_VERSION}*\n"
+        f"📅 _Last Updated: {VERSION_DATE}_\n\n"
+        f"📝 *What's New:*\n{CHANGELOG}"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
 async def send_word(chat, row):
     if not row:
         await chat.reply_text("No word found.")
@@ -792,6 +809,7 @@ def main():
     conv = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
+            CommandHandler("version", version_command),
             MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_handler)
         ],
         states={
@@ -832,6 +850,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
