@@ -262,9 +262,7 @@ def main_keyboard_bottom(is_admin=False):
 
 def add_word_choice_keyboard(): return ReplyKeyboardMarkup([["Manual", "🤖 AI"], ["🏠 Cancel"]], resize_keyboard=True)
 def settings_keyboard(): return ReplyKeyboardMarkup([["🔄 Source Priority", "🏠 Cancel"]], resize_keyboard=True)
-def priority_keyboard(): 
-    # Show all 5 sources as options (simplified view)
-    return ReplyKeyboardMarkup([["Cambridge First", "Webster First"], ["🏠 Cancel"]], resize_keyboard=True)
+def priority_keyboard(): return ReplyKeyboardMarkup([["🏠 Cancel"]], resize_keyboard=True)
 
 # ================= HANDLERS =================
 async def common_cancel(update, context):
@@ -313,8 +311,13 @@ async def main_menu_handler(update, context):
     is_admin = uid in ADMIN_IDS
 
     if text == "🎯 Get Word":
-        with db() as c: row = c.execute("SELECT * FROM words ORDER BY RANDOM() LIMIT 1").fetchone()
-        await send_word(update.message, row)
+        # We use pick_word_for_user so it checks sent_words table (No Repeats)
+        word = pick_word_for_user(uid)
+        if not word:
+            await update.message.reply_text("🎉 You have seen all available words! (Resetting cycle...)")
+            # Optional: You could auto-clear sent_words here if you want an endless loop
+        else:
+            await send_word(update.message, word)
         return ConversationHandler.END
     if text == "➕ Add Word":
         await update.message.reply_text("Add Method:", reply_markup=add_word_choice_keyboard())
@@ -418,40 +421,67 @@ async def search_perform(update, context):
     return await common_cancel(update, context)
 
 async def search_add_redirect(update, context):
-    # Handles the "Yes, Add" click from search
     text = update.message.text
     word = context.user_data.get("add_preload")
     
     if text == "Yes, AI Add":
-        update.message.text = word # Pretend user typed the word
+        await update.message.reply_text(f"🤖 AI is processing '{word}'...")
+        # Manually set the text so the AI function sees it
+        update.message.text = word 
+        # Call the AI process directly
         return await ai_add_process(update, context)
+        
     elif text == "Yes, Manual Add":
         context.user_data["manual_step"] = 0
-        context.user_data["topic"] = "General" # Default topic
-        await update.message.reply_text(f"Adding '{word}'. Level?")
-        return MANUAL_ADD_LEVEL
+        context.user_data["topic"] = "General"
+        # Manually set the Topic to "General" so we skip to Level
+        context.user_data["topic"] = "General" 
+        await update.message.reply_text(f"Adding '{word}'.\nWhat is the **Level**? (A1-C2)")
+        return MANUAL_ADD_LEVEL # Skip topic, go straight to Level
+        
     else:
         return await common_cancel(update, context)
 
 # --- Settings ---
 async def settings_choice(update, context):
     if update.message.text == "🔄 Source Priority":
-        await update.message.reply_text("Choose:", reply_markup=priority_keyboard())
+        msg = (
+            "🔢 **Set Source Priority**\n\n"
+            "Current Order:\n"
+            "1. Cambridge\n2. Merriam-Webster\n3. Oxford\n4. Collins\n5. Longman\n\n"
+            "**Send me the order you want using numbers.**\n"
+            "Example: `21345` (puts Webster first, then Cambridge...)\n"
+            "Example: `51234` (puts Longman first...)"
+        )
+        await update.message.reply_text(msg, reply_markup=priority_keyboard(), parse_mode="Markdown")
         return SETTINGS_PRIORITY
     return await common_cancel(update, context)
 
 async def set_priority(update, context):
-    text = update.message.text
+    text = update.message.text.strip()
     if text == "🏠 Cancel": return await common_cancel(update, context)
-    # Simple logic for now: Put selected first, keep others in default order
-    prefs = DEFAULT_SOURCES.copy()
-    if text == "Cambridge First": 
-        pass # Default
-    elif text == "Webster First":
-        prefs.insert(0, prefs.pop(prefs.index("Merriam-Webster")))
     
-    with db() as c: c.execute("UPDATE users SET source_prefs=? WHERE user_id=?", (json.dumps(prefs), update.effective_user.id))
-    await update.message.reply_text(f"Saved: {prefs[0]} is top priority.")
+    # Validate input (must contain 5 unique numbers from 1-5)
+    if not re.fullmatch(r"[1-5]{5}", text) or len(set(text)) != 5:
+        await update.message.reply_text("❌ Invalid format. Please send 5 unique numbers (e.g., `12345` or `21345`).")
+        return SETTINGS_PRIORITY
+
+    # Map numbers to names
+    mapping = {
+        "1": "Cambridge",
+        "2": "Merriam-Webster",
+        "3": "Oxford",
+        "4": "Collins",
+        "5": "Longman"
+    }
+    
+    new_order = [mapping[char] for char in text]
+    
+    uid = update.effective_user.id
+    with db() as c:
+        c.execute("UPDATE users SET source_prefs=? WHERE user_id=?", (json.dumps(new_order), uid))
+        
+    await update.message.reply_text(f"✅ Priority Saved:\n1. {new_order[0]}\n2. {new_order[1]}...")
     return await common_cancel(update, context)
 
 # --- Report ---
@@ -545,16 +575,28 @@ async def ai_add_process(update, context):
     return await common_cancel(update, context)
 
 async def manual_add_steps(update, context):
+    text = update.message.text
+    # FIX: Check for cancel BEFORE processing input
+    if text == "🏠 Cancel":
+        return await common_cancel(update, context)
+
     current = context.user_data.get("manual_step", 0)
     keys = ["topic", "level", "word", "definition", "example", "pronunciation"]
-    context.user_data[keys[current]] = update.message.text
+    
+    # Save input
+    context.user_data[keys[current]] = text
+    
+    # Move to next step
     if current < 5:
-        await update.message.reply_text(["Level?", "Word?", "Definition?", "Example?", "Pronunciation?"][current])
+        next_prompt = ["Level?", "Word?", "Definition?", "Example?", "Pronunciation?"][current]
+        await update.message.reply_text(next_prompt)
         context.user_data["manual_step"] = current + 1
+        # We must return the specific state for the next step
         return MANUAL_ADD_TOPIC + current + 1
     
+    # Final Step: Save
     count, dups = await save_word_list_to_db([context.user_data], topic=context.user_data["topic"])
-    msg = "Saved." if count > 0 else "Duplicate skipped."
+    msg = "✅ Saved." if count > 0 else "⚠️ Duplicate skipped."
     await update.message.reply_text(msg)
     return await common_cancel(update, context)
 
@@ -602,9 +644,19 @@ async def broadcast_handler(update, context):
     return await common_cancel(update, context)
 
 # --- System ---
+# [REPLACE THE OLD send_word FUNCTION WITH THIS]
 async def send_word(chat, row):
-    if not row: await chat.reply_text("No word found."); return
-    text = f"📖 *{row['word']}*\n🏷 {row['level']} | {row['topic']}\n💡 {row['definition']}\n📝 _Ex: {row['example']}_\n🗣 {row['pronunciation']}"
+    if not row:
+        await chat.reply_text("No word found.")
+        return
+    text = (
+        f"📖 *{row['word']}*\n"
+        f"🏷 {row['level']} | {row['topic']}\n"
+        f"💡 {row['definition']}\n"
+        f"📝 _Ex: {row['example']}_\n"
+        f"🗣 {row['pronunciation']}\n"
+        f"📚 _Source: {row['source']}_"
+    )
     await chat.reply_text(text, parse_mode="Markdown")
 
 async def auto_backup(context):
@@ -677,3 +729,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
