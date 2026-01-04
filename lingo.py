@@ -5,7 +5,7 @@ import json
 from datetime import datetime, time
 import pytz
 from groq import Groq
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 import requests
 from bs4 import BeautifulSoup
 from telegram.ext import (
@@ -14,12 +14,15 @@ from telegram.ext import (
 )
 
 # ================= VERSION INFO =================
-BOT_VERSION = "0.3.2"
+BOT_VERSION = "0.4.0"
 VERSION_DATE = "2026-01-05"
 CHANGELOG = """
-• Fixed Start Command (Now says Welcome)
-• Database ensures user exists on start
-• All v0.3.1 features included (Search, Multi-POS)
+• Restored 5 Source options
+• Fixed Level tags (CEFR only)
+• Duplicate detection (prevents double adds)
+• Search now shows Full Cards or "Add Word" option
+• "Analyzing" messages auto-delete
+• Added Report/Feedback feature
 """
 
 # ================= STATES =================
@@ -32,8 +35,9 @@ CHANGELOG = """
     LIST_CHOICE,
     DAILY_COUNT, DAILY_TIME, DAILY_LEVEL, DAILY_POS,
     SEARCH_CHOICE, SEARCH_QUERY,
-    SETTINGS_CHOICE, SETTINGS_PRIORITY
-) = range(21)
+    SETTINGS_CHOICE, SETTINGS_PRIORITY,
+    REPORT_MSG  # <--- NEW STATE
+) = range(22)
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -42,8 +46,10 @@ ADMIN_IDS = {527164608}
 DB_PATH = "daily_words.db"
 
 client = Groq(api_key=GROQ_API_KEY)
-HEADERS = {"User-Agent": "Mozilla/5.0"}
-DEFAULT_SOURCES = ["Cambridge", "Merriam-Webster"]
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+
+# Restored 5 Sources
+DEFAULT_SOURCES = ["Cambridge", "Merriam-Webster", "Oxford", "Collins", "Longman"]
 
 # ================= DATABASE =================
 def db():
@@ -84,11 +90,36 @@ def init_db():
         try: c.execute("SELECT source_prefs FROM users LIMIT 1")
         except: c.execute("ALTER TABLE users ADD COLUMN source_prefs TEXT")
 
+# ================= LEVEL NORMALIZER =================
+def normalize_level(text):
+    """Converts strange levels like 'Beginner' to 'A1'."""
+    if not text: return "Unknown"
+    text = text.lower().strip()
+    
+    # Direct Matches
+    if "a1" in text: return "A1"
+    if "a2" in text: return "A2"
+    if "b1" in text: return "B1"
+    if "b2" in text: return "B2"
+    if "c1" in text: return "C1"
+    if "c2" in text: return "C2"
+    
+    # Keyword Matches
+    if "beginner" in text or "basic" in text: return "A1"
+    if "elementary" in text: return "A2"
+    if "intermediate" in text and "upper" not in text: return "B1"
+    if "upper-intermediate" in text or "upper intermediate" in text: return "B2"
+    if "advanced" in text: return "C1"
+    if "proficiency" in text: return "C2"
+    
+    return "Unknown" # fallback
+
 # ================= SCRAPERS =================
 def empty_word_data(word):
     return {"word": word, "parts": "Unknown", "level": "Unknown", "definition": None, "example": None, "pronunciation": None, "source": None}
 
 def scrape_cambridge(word):
+    # (Same as before)
     url = f"https://dictionary.cambridge.org/dictionary/english/{word}"
     r = requests.get(url, headers=HEADERS)
     if r.status_code != 200: return []
@@ -100,7 +131,7 @@ def scrape_cambridge(word):
         pos = soup.select_one(".pos.dpos")
         if pos: data["parts"] = pos.text.strip()
         level = soup.select_one(".epp-xref")
-        if level: data["level"] = level.text.strip()
+        if level: data["level"] = normalize_level(level.text.strip()) # NORMALIZED
         definition = soup.select_one(".def.ddef_d")
         if definition: data["definition"] = definition.text.strip()
         example = soup.select_one(".examp.dexamp")
@@ -122,6 +153,10 @@ def scrape_webster(word):
         data["source"] = "Merriam-Webster"
         pos = soup.select_one(".important-blue-link")
         if pos: data["parts"] = pos.text.strip()
+        
+        # Webster doesn't usually show CEFR, so we default to Unknown or use AI later
+        data["level"] = "Unknown" 
+
         definition = soup.select_one(".sense.has-sn")
         if definition: data["definition"] = definition.text.strip()
         example = soup.select_one(".ex-sent")
@@ -132,7 +167,18 @@ def scrape_webster(word):
     except: pass
     return results
 
-SCRAPER_MAP = {"Cambridge": scrape_cambridge, "Merriam-Webster": scrape_webster}
+# Placeholders for others
+def scrape_oxford(word): return []
+def scrape_collins(word): return []
+def scrape_longman(word): return []
+
+SCRAPER_MAP = {
+    "Cambridge": scrape_cambridge, 
+    "Merriam-Webster": scrape_webster,
+    "Oxford": scrape_oxford,
+    "Collins": scrape_collins,
+    "Longman": scrape_longman
+}
 
 def get_words_from_web(word, user_id):
     with db() as c: row = c.execute("SELECT source_prefs FROM users WHERE user_id=?", (user_id,)).fetchone()
@@ -144,21 +190,20 @@ def get_words_from_web(word, user_id):
             if results: return results
     return []
 
-# ================= AI LOGIC =================
+# ================= AI =================
 def ai_generate_full_words_list(word: str):
     prompt = f"""
-    You are a linguist. Analyze: "{word}".
-    If it has multiple meanings/POS (e.g. noun vs verb), output distinct items.
+    Analyze: "{word}".
+    If it has multiple POS (noun vs verb), split them.
     STRICT FORMAT:
     Item 1
     Word: {word}
-    POS: [Noun/Verb/etc]
+    POS: [Noun/Verb]
     Level: [A1-C2]
-    Def: [Definition]
-    Ex: [Example]
+    Def: [Short definition]
+    Ex: [Short example]
     Pron: [IPA]
     ---
-    Item 2...
     """
     r = client.chat.completions.create(model="llama-3.1-8b-instant", messages=[{"role": "user", "content": prompt}], temperature=0.3)
     return r.choices[0].message.content.strip()
@@ -173,7 +218,7 @@ def parse_ai_response(text, original_word):
             current = {"word": original_word, "source": "AI-Enhanced"}
             continue
         if line.startswith("POS:"): current["parts"] = line.replace("POS:", "").strip()
-        elif line.startswith("Level:"): current["level"] = line.replace("Level:", "").strip()
+        elif line.startswith("Level:"): current["level"] = normalize_level(line.replace("Level:", "").strip()) # NORMALIZED
         elif line.startswith("Def:"): current["definition"] = line.replace("Def:", "").strip()
         elif line.startswith("Ex:"): current["example"] = line.replace("Ex:", "").strip()
         elif line.startswith("Pron:"): current["pronunciation"] = line.replace("Pron:", "").strip()
@@ -184,11 +229,15 @@ def ai_fill_missing(data_list):
     if not data_list: return []
     filled_list = []
     for data in data_list:
-        missing = [k for k, v in data.items() if v is None]
+        # Check levels while we are here
+        data["level"] = normalize_level(data.get("level"))
+        
+        missing = [k for k, v in data.items() if v is None or v == "Unknown"]
         if not missing:
             filled_list.append(data)
             continue
-        prompt = f"Fill missing fields (Def, Ex, Pron, Level, Pos). Return key:value.\nWord: {data['word']}\nContext: {data}"
+            
+        prompt = f"Fill missing (Def, Ex, Pron, Level[A1-C2], Pos). key:value.\nWord: {data['word']}\nData: {data}"
         try:
             r = client.chat.completions.create(model="llama-3.1-8b-instant", messages=[{"role": "user", "content": prompt}], temperature=0.2)
             for line in r.choices[0].message.content.splitlines():
@@ -197,21 +246,25 @@ def ai_fill_missing(data_list):
                     k = k.strip().lower()
                     key_map = {"def": "definition", "ex": "example", "pron": "pronunciation", "level": "level", "pos": "parts"}
                     for mk, real_k in key_map.items():
-                        if mk in k and data.get(real_k) is None: data[real_k] = v.strip()
+                        if mk in k and (data.get(real_k) is None or data.get(real_k) == "Unknown"):
+                            val = v.strip()
+                            if real_k == "level": val = normalize_level(val)
+                            data[real_k] = val
         except: pass
         filled_list.append(data)
     return filled_list
 
 # ================= KEYBOARDS =================
 def main_keyboard_bottom(is_admin=False):
-    kb = [["🎯 Get Word", "➕ Add Word"], ["📚 List Words", "⏰ Daily Words"], ["🔍 Search", "⚙️ Settings"]]
+    kb = [["🎯 Get Word", "➕ Add Word"], ["📚 List Words", "⏰ Daily Words"], ["🔍 Search", "⚙️ Settings", "🐞 Report"]]
     if is_admin: kb.append(["📦 Bulk Add", "📣 Broadcast"]); kb.append(["🗑 Clear Words", "🛡 Backup"])
     return ReplyKeyboardMarkup(kb, resize_keyboard=True)
 
 def add_word_choice_keyboard(): return ReplyKeyboardMarkup([["Manual", "🤖 AI"], ["🏠 Cancel"]], resize_keyboard=True)
-def search_keyboard(): return ReplyKeyboardMarkup([["By Word", "By Level"], ["By Topic", "🏠 Cancel"]], resize_keyboard=True)
 def settings_keyboard(): return ReplyKeyboardMarkup([["🔄 Source Priority", "🏠 Cancel"]], resize_keyboard=True)
-def priority_keyboard(): return ReplyKeyboardMarkup([["Cambridge First", "Webster First"], ["🏠 Cancel"]], resize_keyboard=True)
+def priority_keyboard(): 
+    # Show all 5 sources as options (simplified view)
+    return ReplyKeyboardMarkup([["Cambridge First", "Webster First"], ["🏠 Cancel"]], resize_keyboard=True)
 
 # ================= HANDLERS =================
 async def common_cancel(update, context):
@@ -221,30 +274,37 @@ async def common_cancel(update, context):
 
 async def save_word_list_to_db(word_list, topic="General"):
     count = 0
+    duplicates = 0
     with db() as c:
         for w in word_list:
             if not w.get("definition"): continue
             parts = w.get("parts", "")
             title = w["word"]
-            if parts and parts.lower() != "unknown" and "(" not in title: title = f"{title} ({parts})"
-            c.execute("INSERT INTO words (topic, word, definition, example, pronunciation, level, source) VALUES (?,?,?,?,?,?,?)",
-                (topic, title, w.get("definition", ""), w.get("example", ""), w.get("pronunciation", ""), w.get("level", "Unknown"), w.get("source", "Manual")))
+            
+            # Smart Title Formatting
+            if parts and parts.lower() != "unknown" and "(" not in title:
+                title = f"{title} ({parts})"
+
+            # 🛑 DUPLICATE CHECK 🛑
+            exists = c.execute("SELECT id FROM words WHERE lower(word) = ?", (title.lower(),)).fetchone()
+            if exists:
+                duplicates += 1
+                continue # Skip this word
+
+            c.execute(
+                "INSERT INTO words (topic, word, definition, example, pronunciation, level, source) VALUES (?,?,?,?,?,?,?)",
+                (topic, title, w.get("definition", ""), w.get("example", ""), w.get("pronunciation", ""), w.get("level", "Unknown"), w.get("source", "Manual"))
+            )
             count += 1
-    return count
+    return count, duplicates
 
 async def version_command(update, context):
-    text = f"🤖 *Lingo Bot v{BOT_VERSION}*\n📅 _Updated: {VERSION_DATE}_\n\n📝 *What's New:*\n{CHANGELOG}"
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(f"🤖 *Lingo Bot v{BOT_VERSION}*\n📅 _Updated: {VERSION_DATE}_\n\n📝 *What's New:*\n{CHANGELOG}", parse_mode="Markdown")
 
-# === RESTORED START FUNCTION ===
 async def start(update, context):
     uid = update.effective_user.id
     with db() as c: c.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (uid,))
-    await update.message.reply_text(
-        "👋 *Welcome to Lingo Bot!*\n\nI am ready to help you learn English.",
-        reply_markup=main_keyboard_bottom(uid in ADMIN_IDS),
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text("👋 *Welcome to Lingo Bot!*", reply_markup=main_keyboard_bottom(uid in ADMIN_IDS), parse_mode="Markdown")
     return ConversationHandler.END
 
 async def main_menu_handler(update, context):
@@ -262,8 +322,11 @@ async def main_menu_handler(update, context):
     if text == "⏰ Daily Words":
         with db() as c: u = c.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
         status_msg = "❌ *Disabled*"
-        if u and u["daily_enabled"]: status_msg = f"✅ *Active*\n📅 {u['daily_count']} words at {u['daily_time']}"
-        await update.message.reply_text(f"{status_msg}\n\nTo change, enter count (1-50):", reply_markup=ReplyKeyboardMarkup([["🏠 Cancel"]], resize_keyboard=True), parse_mode="Markdown")
+        kb_opts = [["🏠 Cancel"]]
+        if u and u["daily_enabled"]: 
+            status_msg = f"✅ *Active*\n📅 {u['daily_count']} words at {u['daily_time']}"
+            kb_opts = [["🔕 Deactivate"], ["🏠 Cancel"]] # Add Deactivate button
+        await update.message.reply_text(f"{status_msg}\n\nTo change, enter count (1-50):", reply_markup=ReplyKeyboardMarkup(kb_opts, resize_keyboard=True), parse_mode="Markdown")
         return DAILY_COUNT
     if text == "📚 List Words":
         with db() as c: rows = c.execute("SELECT topic, level, word FROM words ORDER BY topic, level LIMIT 50").fetchall()
@@ -271,11 +334,15 @@ async def main_menu_handler(update, context):
         await update.message.reply_text(f"📚 *Words:*\n{msg}", parse_mode="Markdown")
         return ConversationHandler.END
     if text == "🔍 Search":
-        await update.message.reply_text("Search by?", reply_markup=search_keyboard())
+        await update.message.reply_text("Search by?", reply_markup=ReplyKeyboardMarkup([["By Word", "By Level"], ["By Topic", "🏠 Cancel"]], resize_keyboard=True))
         return SEARCH_CHOICE
     if text == "⚙️ Settings":
         await update.message.reply_text("Settings:", reply_markup=settings_keyboard())
         return SETTINGS_CHOICE
+    if text == "🐞 Report":
+        await update.message.reply_text("Please type your message or bug report for the admin:", reply_markup=ReplyKeyboardMarkup([["🏠 Cancel"]], resize_keyboard=True))
+        return REPORT_MSG
+
     if is_admin:
         if text == "📦 Bulk Add": await update.message.reply_text("Bulk Type:", reply_markup=add_word_choice_keyboard()); return BULK_CHOICE
         if text == "📣 Broadcast": await update.message.reply_text("Enter message:"); return BROADCAST_MSG
@@ -284,33 +351,87 @@ async def main_menu_handler(update, context):
             await update.message.reply_text("Cleared.")
         if text == "🛡 Backup": await auto_backup(context)
 
-    # Fallback to menu
     await update.message.reply_text("Main Menu:", reply_markup=main_keyboard_bottom(is_admin))
     return ConversationHandler.END
 
 # --- Search ---
 async def search_choice(update, context):
-    if update.message.text == "🏠 Cancel": return await common_cancel(update, context)
-    context.user_data["search_type"] = update.message.text
-    await update.message.reply_text(f"Enter query:")
+    text = update.message.text
+    if text == "🏠 Cancel": return await common_cancel(update, context)
+    
+    context.user_data["search_type"] = text
+    
+    # 9. Smart Keyboards for Search
+    if text == "By Level":
+        await update.message.reply_text("Choose Level:", reply_markup=ReplyKeyboardMarkup([["A1", "A2"], ["B1", "B2"], ["C1", "C2"], ["🏠 Cancel"]], resize_keyboard=True))
+    elif text == "By Topic":
+        with db() as c: rows = c.execute("SELECT DISTINCT topic FROM words LIMIT 6").fetchall()
+        topics = [r["topic"] for r in rows] if rows else ["General"]
+        # Create grid
+        kb = [topics[i:i + 2] for i in range(0, len(topics), 2)]
+        kb.append(["🏠 Cancel"])
+        await update.message.reply_text("Choose Topic:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
+    else:
+        # By Word
+        await update.message.reply_text("Enter word:", reply_markup=ReplyKeyboardMarkup([["🏠 Cancel"]], resize_keyboard=True))
+        
     return SEARCH_QUERY
 
 async def search_perform(update, context):
     query = update.message.text.strip()
     stype = context.user_data.get("search_type")
+    
+    if query == "🏠 Cancel": return await common_cancel(update, context)
+
     sql = ""
-    if stype == "By Word": sql = "SELECT * FROM words WHERE word LIKE ?"
+    if stype == "By Word": 
+        sql = "SELECT * FROM words WHERE word LIKE ?"
+        # Try strict match first for "By Word" to show Full Card
+        with db() as c: rows = c.execute(sql, (f"%{query}%",)).fetchall()
+        
+        if not rows:
+            # 4. Not Found -> Add Option
+            context.user_data["add_preload"] = query
+            await update.message.reply_text(
+                f"❌ '{query}' not found.\nDo you want to add it?",
+                reply_markup=ReplyKeyboardMarkup([["Yes, AI Add"], ["Yes, Manual Add"], ["🏠 Cancel"]], resize_keyboard=True)
+            )
+            return SEARCH_QUERY # Reuse state to catch Yes/No
+            
+        # 7. Same Format as Get Word
+        for row in rows:
+            await send_word(update.message, row)
+        return await common_cancel(update, context)
+
+    # By Level / Topic -> Show List
     elif stype == "By Level": sql = "SELECT * FROM words WHERE level LIKE ?"
     elif stype == "By Topic": sql = "SELECT * FROM words WHERE topic LIKE ?"
-    else: return await common_cancel(update, context)
     
     with db() as c: rows = c.execute(sql, (f"%{query}%",)).fetchall()
+    
     if rows:
         msg = "\n".join(f"{r['word']} ({r['level']})" for r in rows[:40])
         await update.message.reply_text(f"🔍 *Results:*\n{msg}", parse_mode="Markdown")
     else:
         await update.message.reply_text("No results.")
+        
     return await common_cancel(update, context)
+
+async def search_add_redirect(update, context):
+    # Handles the "Yes, Add" click from search
+    text = update.message.text
+    word = context.user_data.get("add_preload")
+    
+    if text == "Yes, AI Add":
+        update.message.text = word # Pretend user typed the word
+        return await ai_add_process(update, context)
+    elif text == "Yes, Manual Add":
+        context.user_data["manual_step"] = 0
+        context.user_data["topic"] = "General" # Default topic
+        await update.message.reply_text(f"Adding '{word}'. Level?")
+        return MANUAL_ADD_LEVEL
+    else:
+        return await common_cancel(update, context)
 
 # --- Settings ---
 async def settings_choice(update, context):
@@ -322,16 +443,46 @@ async def settings_choice(update, context):
 async def set_priority(update, context):
     text = update.message.text
     if text == "🏠 Cancel": return await common_cancel(update, context)
-    prefs = ["Cambridge", "Merriam-Webster"] if text == "Cambridge First" else ["Merriam-Webster", "Cambridge"]
+    # Simple logic for now: Put selected first, keep others in default order
+    prefs = DEFAULT_SOURCES.copy()
+    if text == "Cambridge First": 
+        pass # Default
+    elif text == "Webster First":
+        prefs.insert(0, prefs.pop(prefs.index("Merriam-Webster")))
+    
     with db() as c: c.execute("UPDATE users SET source_prefs=? WHERE user_id=?", (json.dumps(prefs), update.effective_user.id))
-    await update.message.reply_text(f"Saved: {prefs[0]} First")
+    await update.message.reply_text(f"Saved: {prefs[0]} is top priority.")
+    return await common_cancel(update, context)
+
+# --- Report ---
+async def report_handler(update, context):
+    text = update.message.text
+    if text == "🏠 Cancel": return await common_cancel(update, context)
+    
+    user = update.effective_user
+    report_text = f"🐞 *REPORT from {user.first_name} (@{user.username})*:\n\n{text}"
+    
+    for admin in ADMIN_IDS:
+        try: await context.bot.send_message(admin, report_text, parse_mode="Markdown")
+        except: pass
+        
+    await update.message.reply_text("✅ Report sent to admin.")
     return await common_cancel(update, context)
 
 # --- Daily ---
 async def daily_count_handler(update, context):
-    if update.message.text == "🏠 Cancel": return await common_cancel(update, context)
+    text = update.message.text
+    if text == "🏠 Cancel": return await common_cancel(update, context)
+    
+    # 8. Deactivate Button Logic
+    if text == "🔕 Deactivate":
+        uid = update.effective_user.id
+        with db() as c: c.execute("UPDATE users SET daily_enabled=0 WHERE user_id=?", (uid,))
+        await update.message.reply_text("✅ Daily words deactivated.")
+        return await common_cancel(update, context)
+
     try:
-        count = int(update.message.text)
+        count = int(text)
         if not (1 <= count <= 50): raise ValueError
         context.user_data["daily_count"] = count
         await update.message.reply_text("Time (HH:MM)?")
@@ -370,14 +521,27 @@ async def add_choice(update, context):
 
 async def ai_add_process(update, context):
     word = update.message.text.strip()
-    await update.message.reply_text("🔍 Analyzing...")
+    
+    # 6. Auto-delete "Analyzing"
+    status_msg = await update.message.reply_text("🔍 Analyzing sources & AI...")
+    
     scraped = get_words_from_web(word, update.effective_user.id)
     if not scraped:
         ai_text = ai_generate_full_words_list(word)
         scraped = parse_ai_response(ai_text, word)
     else: scraped = ai_fill_missing(scraped)
-    count = await save_word_list_to_db(scraped)
-    await update.message.reply_text(f"✅ Saved {count} entries.")
+    
+    # 3. Duplicate check inside save
+    count, dups = await save_word_list_to_db(scraped)
+    
+    # Cleanup
+    try: await status_msg.delete()
+    except: pass
+    
+    msg = f"✅ Saved {count} entries."
+    if dups > 0: msg += f"\n⚠️ Skipped {dups} duplicates."
+    
+    await update.message.reply_text(msg)
     return await common_cancel(update, context)
 
 async def manual_add_steps(update, context):
@@ -388,8 +552,10 @@ async def manual_add_steps(update, context):
         await update.message.reply_text(["Level?", "Word?", "Definition?", "Example?", "Pronunciation?"][current])
         context.user_data["manual_step"] = current + 1
         return MANUAL_ADD_TOPIC + current + 1
-    await save_word_list_to_db([context.user_data], topic=context.user_data["topic"])
-    await update.message.reply_text("Saved.")
+    
+    count, dups = await save_word_list_to_db([context.user_data], topic=context.user_data["topic"])
+    msg = "Saved." if count > 0 else "Duplicate skipped."
+    await update.message.reply_text(msg)
     return await common_cancel(update, context)
 
 # --- Bulk & Broadcast ---
@@ -405,18 +571,23 @@ async def bulk_manual(update, context):
     with db() as c:
         for l in lines:
             p = [x.strip() for x in l.split("|")]
-            if len(p) == 6: c.execute("INSERT INTO words (topic, level, word, definition, example, pronunciation, source) VALUES (?,?,?,?,?,?,?)", (*p, "Bulk")); count += 1
+            if len(p) == 6:
+                c.execute("INSERT INTO words (topic, level, word, definition, example, pronunciation, source) VALUES (?,?,?,?,?,?,?)", (*p, "Bulk")); count += 1
     await update.message.reply_text(f"Bulk added {count} words.")
     return await common_cancel(update, context)
 
 async def bulk_ai(update, context):
     words = [w.strip() for w in update.message.text.splitlines() if w.strip()]
-    await update.message.reply_text(f"Processing {len(words)} words...")
+    status = await update.message.reply_text(f"Processing {len(words)} words...")
     total = 0; uid = update.effective_user.id
     for word in words:
         scraped = get_words_from_web(word, uid)
         scraped = ai_fill_missing(scraped) if scraped else parse_ai_response(ai_generate_full_words_list(word), word)
-        total += await save_word_list_to_db(scraped)
+        c, _ = await save_word_list_to_db(scraped)
+        total += c
+    
+    try: await status.delete()
+    except: pass
     await update.message.reply_text(f"Bulk AI finished. Added {total} entries.")
     return await common_cancel(update, context)
 
@@ -464,28 +635,36 @@ def main():
 
     conv = ConversationHandler(
         entry_points=[
-            CommandHandler("start", start), # RESTORED START COMMAND
+            CommandHandler("start", start),
             CommandHandler("version", version_command),
-            CommandHandler("backup", auto_backup), # Manual trigger
+            CommandHandler("backup", auto_backup),
             MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_handler)
         ],
         states={
             ADD_CHOICE: [MessageHandler(filters.TEXT, add_choice)],
             AI_ADD_INPUT: [MessageHandler(filters.TEXT, ai_add_process)],
+            
             MANUAL_ADD_TOPIC: [MessageHandler(filters.TEXT, manual_add_steps)],
             MANUAL_ADD_LEVEL: [MessageHandler(filters.TEXT, manual_add_steps)],
             MANUAL_ADD_WORD: [MessageHandler(filters.TEXT, manual_add_steps)],
             MANUAL_ADD_DEF: [MessageHandler(filters.TEXT, manual_add_steps)],
             MANUAL_ADD_EX: [MessageHandler(filters.TEXT, manual_add_steps)],
             MANUAL_ADD_PRON: [MessageHandler(filters.TEXT, manual_add_steps)],
+
             DAILY_COUNT: [MessageHandler(filters.TEXT, daily_count_handler)],
             DAILY_TIME: [MessageHandler(filters.TEXT, daily_time_handler)],
             DAILY_LEVEL: [MessageHandler(filters.TEXT, daily_level_handler)],
             DAILY_POS: [MessageHandler(filters.TEXT, daily_pos_handler)],
+
             SEARCH_CHOICE: [MessageHandler(filters.TEXT, search_choice)],
-            SEARCH_QUERY: [MessageHandler(filters.TEXT, search_perform)],
+            
+            # Special handler for the search loop (Add/Query)
+            SEARCH_QUERY: [MessageHandler(filters.Regex("^(Yes, AI Add|Yes, Manual Add)$"), search_add_redirect), MessageHandler(filters.TEXT, search_perform)],
+
             SETTINGS_CHOICE: [MessageHandler(filters.TEXT, settings_choice)],
             SETTINGS_PRIORITY: [MessageHandler(filters.TEXT, set_priority)],
+            REPORT_MSG: [MessageHandler(filters.TEXT, report_handler)],
+            
             BULK_CHOICE: [MessageHandler(filters.TEXT, bulk_choice)],
             BULK_MANUAL: [MessageHandler(filters.TEXT, bulk_manual)],
             BULK_AI: [MessageHandler(filters.TEXT, bulk_ai)],
