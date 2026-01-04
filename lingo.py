@@ -48,8 +48,8 @@ DB_PATH = "daily_words.db"
 client = Groq(api_key=GROQ_API_KEY)
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
 
-# Restored 5 Sources
-DEFAULT_SOURCES = ["Cambridge", "Merriam-Webster", "Oxford", "Collins", "Longman"]
+# Only the reliable 3
+DEFAULT_SOURCES = ["Cambridge", "Merriam-Webster", "Longman"]
 
 # ================= DATABASE =================
 def db():
@@ -175,8 +175,6 @@ def scrape_longman(word): return []
 SCRAPER_MAP = {
     "Cambridge": scrape_cambridge, 
     "Merriam-Webster": scrape_webster,
-    "Oxford": scrape_oxford,
-    "Collins": scrape_collins,
     "Longman": scrape_longman
 }
 
@@ -474,10 +472,9 @@ async def settings_choice(update, context):
         msg = (
             "🔢 **Set Source Priority**\n\n"
             "Current Order:\n"
-            "1. Cambridge\n2. Merriam-Webster\n3. Oxford\n4. Collins\n5. Longman\n\n"
-            "**Send me the order you want using numbers.**\n"
-            "Example: `21345` (puts Webster first, then Cambridge...)\n"
-            "Example: `51234` (puts Longman first...)"
+            "1. Cambridge\n2. Merriam-Webster\n3. Longman\n\n"
+            "**Send me the order using numbers (1-3).**\n"
+            "Example: `312` (Puts Longman first, then Cambridge...)"
         )
         await update.message.reply_text(msg, reply_markup=priority_keyboard(), parse_mode="Markdown")
         return SETTINGS_PRIORITY
@@ -487,18 +484,16 @@ async def set_priority(update, context):
     text = update.message.text.strip()
     if text == "🏠 Cancel": return await common_cancel(update, context)
     
-    # Validate input (must contain 5 unique numbers from 1-5)
-    if not re.fullmatch(r"[1-5]{5}", text) or len(set(text)) != 5:
-        await update.message.reply_text("❌ Invalid format. Please send 5 unique numbers (e.g., `12345` or `21345`).")
+    # Validation: Must be 3 digits containing 1, 2, and 3
+    if not re.fullmatch(r"[1-3]{3}", text) or len(set(text)) != 3:
+        await update.message.reply_text("❌ Invalid format. Send 3 unique numbers (e.g., `123` or `312`).")
         return SETTINGS_PRIORITY
 
     # Map numbers to names
     mapping = {
         "1": "Cambridge",
         "2": "Merriam-Webster",
-        "3": "Oxford",
-        "4": "Collins",
-        "5": "Longman"
+        "3": "Longman"
     }
     
     new_order = [mapping[char] for char in text]
@@ -762,6 +757,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
