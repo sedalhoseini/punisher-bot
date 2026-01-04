@@ -455,9 +455,6 @@ async def search_add_redirect(update, context):
     word = context.user_data.get("add_preload")
     
     if text == "Yes, AI Add":
-        await update.message.reply_text(f"🤖 AI is processing '{word}'...")
-        # FIX: We removed the line that caused the crash (update.message.text = word)
-        # The ai_add_process function will now automatically find 'word' in user_data
         return await ai_add_process(update, context)
         
     elif text == "Yes, Manual Add":
@@ -765,6 +762,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
