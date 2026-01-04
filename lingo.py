@@ -13,13 +13,11 @@ from telegram.ext import (
 )
 
 # ================= VERSION INFO =================
-# Change these lines whenever you update the bot!
-BOT_VERSION = "1.0.1"
+BOT_VERSION = "0.1.0"
 VERSION_DATE = "2026-01-04"
 CHANGELOG = """
-• Renamed bot to Lingo Bot
-• Fixed database crash issues
-• Added Version command
+• Initial Beta Release for Students
+• Added Daily Words & AI Dictionary
 """
 # ================= DAILY STATES =================
 DAILY_COUNT = 31
@@ -850,6 +848,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
