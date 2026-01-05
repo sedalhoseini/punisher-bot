@@ -248,9 +248,14 @@ def get_words_from_web(word, user_id):
 # ================= AI =================
 def ai_generate_full_words_list(word: str):
     prompt = f"""
-    Analyze: "{word}".
-    If it has multiple POS (noun vs verb), split them.
-    STRICT FORMAT:
+    Task: Analyze the input "{word}".
+    
+    STEP 1: VALIDATION
+    Is this a real, valid English word? 
+    If it is gibberish, random letters (e.g., "asdf"), or a typo that cannot be understood, output STRICTLY: INVALID
+    
+    STEP 2: DEFINITION (Only if valid)
+    If valid, provide the details in this format:
     Item 1
     Word: {word}
     POS: [Noun/Verb]
@@ -260,7 +265,8 @@ def ai_generate_full_words_list(word: str):
     Pron: [IPA]
     ---
     """
-    r = client.chat.completions.create(model="llama-3.1-8b-instant", messages=[{"role": "user", "content": prompt}], temperature=0.3)
+    # Lower temperature to 0.1 to make it strict/serious
+    r = client.chat.completions.create(model="llama-3.1-8b-instant", messages=[{"role": "user", "content": prompt}], temperature=0.1)
     return r.choices[0].message.content.strip()
 
 def parse_ai_response(text, original_word):
@@ -641,28 +647,47 @@ async def add_choice(update, context):
     return await common_cancel(update, context)
 
 async def ai_add_process(update, context):
-    # FIX: Check if we have a preloaded word from Search first
+    # 1. Get the word
     if "add_preload" in context.user_data:
         word = context.user_data["add_preload"]
-        # We keep it in memory briefly or delete it. Let's consume it.
         del context.user_data["add_preload"]
     else:
-        # Normal flow: User typed the word in the chat
         word = update.message.text.strip()
     
-    # 6. Auto-delete "Analyzing"
-    status_msg = await update.message.reply_text("🔍 Analyzing sources & AI...")
+    # 2. Check for Cancel
+    if word == "🏠 Cancel":
+        return await common_cancel(update, context)
+
+    status_msg = await update.message.reply_text("🔍 Analyzing...")
     
+    # 3. Try Web First
     scraped = get_words_from_web(word, update.effective_user.id)
-    if not scraped:
-        ai_text = ai_generate_full_words_list(word)
-        scraped = parse_ai_response(ai_text, word)
-    else: scraped = ai_fill_missing(scraped)
     
-    # 3. Duplicate check inside save
+    if not scraped:
+        # 4. Ask AI (with validation check)
+        ai_text = ai_generate_full_words_list(word)
+        
+        # 🛑 SECURITY CHECK: Did AI say it's nonsense?
+        if "INVALID" in ai_text:
+            try: await status_msg.delete()
+            except: pass
+            await update.message.reply_text(f"❌ '{word}' does not appear to be a valid English word.\n\nPlease type a real word (or /cancel):")
+            return AI_ADD_INPUT # <--- Keeps user in the loop to try again
+            
+        scraped = parse_ai_response(ai_text, word)
+    else:
+        # Web found it, fill gaps
+        scraped = ai_fill_missing(scraped)
+    
+    # 5. Save if we have data
+    if not scraped:
+        try: await status_msg.delete()
+        except: pass
+        await update.message.reply_text("❌ Could not find definition. Try another word:")
+        return AI_ADD_INPUT
+
     count, dups = await save_word_list_to_db(scraped)
     
-    # Cleanup
     try: await status_msg.delete()
     except: pass
     
@@ -848,6 +873,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
