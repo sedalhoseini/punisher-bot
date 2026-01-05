@@ -14,10 +14,10 @@ from telegram.ext import (
 )
 
 # ================= VERSION INFO =================
-BOT_VERSION = "0.5.0"
+BOT_VERSION = "0.6.0"
 VERSION_DATE = "2026-01-05"
 CHANGELOG = """
-• Test
+• New version
 """
 
 # ================= STATES =================
@@ -159,7 +159,6 @@ def scrape_webster(word):
     soup = BeautifulSoup(r.text, "html.parser")
     results = []
     
-    # NEW: Loop through entries
     entries = soup.select(".entry-word-section-container")
     
     for entry in entries:
@@ -196,7 +195,6 @@ def scrape_longman(word):
     soup = BeautifulSoup(r.text, "html.parser")
     results = []
     
-    # Longman uses "Entry" or "ldoceEntry" classes
     entries = soup.select(".ldoceEntry, .Entry")
     
     for entry in entries:
@@ -204,27 +202,21 @@ def scrape_longman(word):
             data = empty_word_data(word)
             data["source"] = "Longman"
             
-            # POS
             pos_tag = entry.select_one(".POS")
             if pos_tag: data["parts"] = pos_tag.text.strip()
             
-            # LEVEL
             level_tag = entry.select_one(".LEVEL_HEADER, .lozenge")
-            if level_tag: data["level"] = normalize_level(level_tag.text.strip()) 
+            if level_tag: data["level"] = normalize_level(level_tag.text.strip())
             
-            # DEFINITION
             def_tag = entry.select_one(".DEF")
             if def_tag: data["definition"] = def_tag.text.strip()
             
-            # EXAMPLE
             ex_tag = entry.select_one(".EXAMPLE")
             if ex_tag: data["example"] = ex_tag.text.strip()
             
-            # PRONUNCIATION
             pron_tag = entry.select_one(".PRON")
             if pron_tag: data["pronunciation"] = pron_tag.text.strip()
             
-            # Only add if we found a definition
             if data["definition"]:
                 results.append(data)
                 if len(results) >= 3: break
@@ -291,30 +283,43 @@ def parse_ai_response(text, original_word):
 def ai_fill_missing(data_list):
     if not data_list: return []
     filled_list = []
+    
     for data in data_list:
-        # Check levels while we are here
         data["level"] = normalize_level(data.get("level"))
         
         missing = [k for k, v in data.items() if v is None or v == "Unknown"]
+        
         if not missing:
             filled_list.append(data)
             continue
             
-        prompt = f"Fill missing (Def, Ex, Pron, Level[A1-C2], Pos). key:value.\nWord: {data['word']}\nData: {data}"
+        prompt = f"""
+        Fill missing fields.
+        Crucial: Estimate CEFR Level (A1-C2) if Unknown.
+        
+        Word: {data['word']}
+        Current Data: {data}
+        
+        Return STRICTLY:
+        Level: [Value]
+        Def: [Value]
+        Ex: [Value]
+        """
         try:
             r = client.chat.completions.create(model="llama-3.1-8b-instant", messages=[{"role": "user", "content": prompt}], temperature=0.2)
             for line in r.choices[0].message.content.splitlines():
                 if ":" in line:
                     k, v = line.split(":", 1)
                     k = k.strip().lower()
-                    key_map = {"def": "definition", "ex": "example", "pron": "pronunciation", "level": "level", "pos": "parts"}
-                    for mk, real_k in key_map.items():
-                        if mk in k and (data.get(real_k) is None or data.get(real_k) == "Unknown"):
-                            val = v.strip()
-                            if real_k == "level": val = normalize_level(val)
-                            data[real_k] = val
+                    v = v.strip()
+                    if "level" in k and data["level"] == "Unknown": data["level"] = normalize_level(v)
+                    if "def" in k and not data["definition"]: data["definition"] = v
+                    if "ex" in k and not data["example"]: data["example"] = v
+                    if "pron" in k and not data["pronunciation"]: data["pronunciation"] = v
+                    if "pos" in k and (not data["parts"] or data["parts"]=="Unknown"): data["parts"] = v
         except: pass
         filled_list.append(data)
+        
     return filled_list
 
 # ================= KEYBOARDS =================
@@ -822,6 +827,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
