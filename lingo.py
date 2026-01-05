@@ -42,8 +42,7 @@ DB_PATH = "daily_words.db"
 
 client = Groq(api_key=GROQ_API_KEY)
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
     "Accept-Language": "en-US,en;q=0.9",
     "Referer": "https://www.google.com/"
 }
@@ -157,42 +156,36 @@ def scrape_cambridge(word):
     return results
 
 def scrape_collins(word):
-    # Collins uses dashes for spaces (e.g. "make-up")
     clean_word = word.strip().replace(" ", "-")
     url = f"https://www.collinsdictionary.com/dictionary/english/{clean_word}"
     
     try:
-        r = requests.get(url, headers=HEADERS, timeout=5)
+        # Added timeout=4 to prevent bot freezing
+        r = requests.get(url, headers=HEADERS, timeout=4)
         if r.status_code != 200: return []
         
         soup = BeautifulSoup(r.text, "html.parser")
         results = []
         
-        # Collins COBUILD section (Best for learners)
         entries = soup.select(".dict-entry")
-        
         for entry in entries:
             try:
                 data = empty_word_data(word)
                 data["source"] = "Collins"
                 
-                # POS
                 pos_tag = entry.select_one(".pos")
                 if pos_tag: data["parts"] = pos_tag.text.strip()
                 
-                # LEVEL (Look for circles like 'A1', 'B2')
+                # Collins often uses 'coa_label' for COBUILD levels
                 level_tag = entry.select_one(".coa_label")
                 if level_tag: data["level"] = normalize_level(level_tag.text.strip())
                 
-                # DEF
                 def_tag = entry.select_one(".def")
                 if def_tag: data["definition"] = def_tag.text.strip()
                 
-                # EX
                 ex_tag = entry.select_one(".quote")
                 if ex_tag: data["example"] = ex_tag.text.strip()
                 
-                # PRON
                 pron_tag = entry.select_one(".pron")
                 if pron_tag: data["pronunciation"] = pron_tag.text.strip()
                 
@@ -208,14 +201,14 @@ def scrape_longman(word):
     url = f"https://www.ldoceonline.com/dictionary/{clean_word}"
     
     try:
-        r = requests.get(url, headers=HEADERS, timeout=5)
+        # Added timeout=4
+        r = requests.get(url, headers=HEADERS, timeout=4)
         if r.status_code != 200: return []
         
         soup = BeautifulSoup(r.text, "html.parser")
         results = []
         
         entries = soup.select(".ldoceEntry, .Entry")
-        
         for entry in entries:
             try:
                 data = empty_word_data(word)
@@ -224,8 +217,7 @@ def scrape_longman(word):
                 pos_tag = entry.select_one(".POS")
                 if pos_tag: data["parts"] = pos_tag.text.strip()
                 
-                # Level
-                level_tag = entry.select_one(".LEVEL_HEADER, .lozenge, .tooltip")
+                level_tag = entry.select_one(".LEVEL_HEADER, .lozenge")
                 if level_tag: data["level"] = normalize_level(level_tag.text.strip())
                 
                 def_tag = entry.select_one(".DEF")
@@ -521,9 +513,13 @@ async def search_choice(update, context):
 
 async def search_perform(update, context):
     query = update.message.text.strip()
+    # Fix: Check if search_type exists. If not, reset to main menu.
     stype = context.user_data.get("search_type")
     
     if query == "🏠 Cancel": return await common_cancel(update, context)
+    if not stype: 
+        await update.message.reply_text("⚠️ Session expired. Please choose search type again.")
+        return await search_choice(update, context)
 
     sql = ""
     if stype == "By Word": 
@@ -916,6 +912,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
