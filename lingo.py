@@ -245,10 +245,14 @@ def normalize_pos_key(text):
     """Helper to unify POS names (e.g., 'n' vs 'noun') for comparison."""
     if not text: return "unknown"
     t = text.lower().strip()
+    
+    # 1. Check Adverb FIRST (because 'adverb' contains the word 'verb')
+    if "adv" in t: return "adverb" 
+    
+    # 2. Then check others
     if "noun" in t or t == "n": return "noun"
     if "verb" in t or t == "v": return "verb"
     if "adj" in t: return "adjective"
-    if "adv" in t: return "adverb"
     if "prep" in t: return "preposition"
     return t
 
@@ -944,6 +948,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
