@@ -243,16 +243,47 @@ SCRAPER_MAP = {
     "Collins": scrape_collins
 }
 
+def normalize_pos_key(text):
+    """Helper to unify POS names (e.g., 'n' vs 'noun') for comparison."""
+    if not text: return "unknown"
+    t = text.lower().strip()
+    if "noun" in t or t == "n": return "noun"
+    if "verb" in t or t == "v": return "verb"
+    if "adj" in t: return "adjective"
+    if "adv" in t: return "adverb"
+    if "prep" in t: return "preposition"
+    return t
+
 def get_words_from_web(word, user_id):
-    with db() as c: row = c.execute("SELECT source_prefs FROM users WHERE user_id=?", (user_id,)).fetchone()
+    with db() as c: 
+        row = c.execute("SELECT source_prefs FROM users WHERE user_id=?", (user_id,)).fetchone()
+    
     pref_list = json.loads(row["source_prefs"]) if row and row["source_prefs"] else DEFAULT_SOURCES
+    
+    combined_results = []
+    seen_pos = set()
+    
     for source_name in pref_list:
         scraper = SCRAPER_MAP.get(source_name)
         if scraper:
+            # 1. Get results from this specific dictionary
             results = scraper(word)
-            if results: return results
-    return []
-
+            
+            for item in results:
+                # 2. Check the Part of Speech (POS)
+                raw_pos = item.get("parts", "Unknown")
+                pos_key = normalize_pos_key(raw_pos)
+                
+                # 3. "Fill the Gap" Logic
+                # If we haven't found this POS yet (from a higher priority source), ADD IT.
+                if pos_key not in seen_pos:
+                    combined_results.append(item)
+                    
+                    # Mark this POS as "Found" so lower priority dictionaries don't overwrite it
+                    if pos_key != "unknown":
+                        seen_pos.add(pos_key)
+                        
+    return combined_results
 # ================= AI =================
 def ai_generate_full_words_list(word: str):
     prompt = f"""
@@ -919,6 +950,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
