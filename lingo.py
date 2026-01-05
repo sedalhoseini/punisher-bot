@@ -238,8 +238,6 @@ def scrape_longman(word):
     
 # Placeholders for others
 def scrape_oxford(word): return []
-def scrape_collins(word): return []
-def scrape_longman(word): return []
 
 SCRAPER_MAP = {
     "Cambridge": scrape_cambridge, 
@@ -912,6 +910,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
