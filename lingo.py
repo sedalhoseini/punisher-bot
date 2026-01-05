@@ -14,15 +14,10 @@ from telegram.ext import (
 )
 
 # ================= VERSION INFO =================
-BOT_VERSION = "0.4.0"
+BOT_VERSION = "0.5.0"
 VERSION_DATE = "2026-01-05"
 CHANGELOG = """
-• Restored 5 Source options
-• Fixed Level tags (CEFR only)
-• Duplicate detection (prevents double adds)
-• Search now shows Full Cards or "Add Word" option
-• "Analyzing" messages auto-delete
-• Added Report/Feedback feature
+• Test
 """
 
 # ================= STATES =================
@@ -119,54 +114,124 @@ def empty_word_data(word):
     return {"word": word, "parts": "Unknown", "level": "Unknown", "definition": None, "example": None, "pronunciation": None, "source": None}
 
 def scrape_cambridge(word):
-    # (Same as before)
     url = f"https://dictionary.cambridge.org/dictionary/english/{word}"
     r = requests.get(url, headers=HEADERS)
     if r.status_code != 200: return []
+    
     soup = BeautifulSoup(r.text, "html.parser")
     results = []
-    try:
-        data = empty_word_data(word)
-        data["source"] = "Cambridge"
-        pos = soup.select_one(".pos.dpos")
-        if pos: data["parts"] = pos.text.strip()
-        level = soup.select_one(".epp-xref")
-        if level: data["level"] = normalize_level(level.text.strip()) # NORMALIZED
-        definition = soup.select_one(".def.ddef_d")
-        if definition: data["definition"] = definition.text.strip()
-        example = soup.select_one(".examp.dexamp")
-        if example: data["example"] = example.text.strip()
-        pron = soup.select_one(".ipa")
-        if pron: data["pronunciation"] = pron.text.strip()
-        if data["definition"]: results.append(data)
-    except: pass
+    
+    # NEW: Loop through all entries to find Noun, Verb, Adj separately
+    entries = soup.select(".pr.entry-body__el")
+    
+    for entry in entries:
+        try:
+            data = empty_word_data(word)
+            data["source"] = "Cambridge"
+            
+            pos_tag = entry.select_one(".pos.dpos")
+            if pos_tag: data["parts"] = pos_tag.text.strip()
+            
+            level_tag = entry.select_one(".epp-xref")
+            if level_tag: data["level"] = normalize_level(level_tag.text.strip())
+            
+            def_tag = entry.select_one(".def.ddef_d")
+            if def_tag: data["definition"] = def_tag.text.strip()
+            
+            ex_tag = entry.select_one(".examp.dexamp")
+            if ex_tag: data["example"] = ex_tag.text.strip()
+            
+            pron_tag = entry.select_one(".ipa")
+            if pron_tag: data["pronunciation"] = pron_tag.text.strip()
+            
+            if data["definition"]: 
+                results.append(data)
+                if len(results) >= 3: break
+        except: pass
+        
     return results
 
 def scrape_webster(word):
     url = f"https://www.merriam-webster.com/dictionary/{word}"
     r = requests.get(url, headers=HEADERS)
     if r.status_code != 200: return []
+    
     soup = BeautifulSoup(r.text, "html.parser")
     results = []
-    try:
-        data = empty_word_data(word)
-        data["source"] = "Merriam-Webster"
-        pos = soup.select_one(".important-blue-link")
-        if pos: data["parts"] = pos.text.strip()
+    
+    # NEW: Loop through entries
+    entries = soup.select(".entry-word-section-container")
+    
+    for entry in entries:
+        try:
+            data = empty_word_data(word)
+            data["source"] = "Merriam-Webster"
+            
+            pos_tag = entry.select_one(".important-blue-link")
+            if pos_tag: data["parts"] = pos_tag.text.strip()
+            
+            data["level"] = "Unknown" 
+            
+            def_tag = entry.select_one(".sense.has-sn .dtText")
+            if def_tag: data["definition"] = def_tag.text.replace(":", "").strip()
+            
+            ex_tag = entry.select_one(".ex-sent")
+            if ex_tag: data["example"] = ex_tag.text.strip()
+            
+            pron_tag = entry.select_one(".pr")
+            if pron_tag: data["pronunciation"] = pron_tag.text.strip()
+            
+            if data["definition"]:
+                results.append(data)
+                if len(results) >= 3: break
+        except: pass
         
-        # Webster doesn't usually show CEFR, so we default to Unknown or use AI later
-        data["level"] = "Unknown" 
-
-        definition = soup.select_one(".sense.has-sn")
-        if definition: data["definition"] = definition.text.strip()
-        example = soup.select_one(".ex-sent")
-        if example: data["example"] = example.text.strip()
-        pron = soup.select_one(".pr")
-        if pron: data["pronunciation"] = pron.text.strip()
-        if data["definition"]: results.append(data)
-    except: pass
     return results
 
+def scrape_longman(word):
+    url = f"https://www.ldoceonline.com/dictionary/{word}"
+    r = requests.get(url, headers=HEADERS)
+    if r.status_code != 200: return []
+    
+    soup = BeautifulSoup(r.text, "html.parser")
+    results = []
+    
+    # Longman uses "Entry" or "ldoceEntry" classes
+    entries = soup.select(".ldoceEntry, .Entry")
+    
+    for entry in entries:
+        try:
+            data = empty_word_data(word)
+            data["source"] = "Longman"
+            
+            # POS
+            pos_tag = entry.select_one(".POS")
+            if pos_tag: data["parts"] = pos_tag.text.strip()
+            
+            # LEVEL
+            level_tag = entry.select_one(".LEVEL_HEADER, .lozenge")
+            if level_tag: data["level"] = normalize_level(level_tag.text.strip()) 
+            
+            # DEFINITION
+            def_tag = entry.select_one(".DEF")
+            if def_tag: data["definition"] = def_tag.text.strip()
+            
+            # EXAMPLE
+            ex_tag = entry.select_one(".EXAMPLE")
+            if ex_tag: data["example"] = ex_tag.text.strip()
+            
+            # PRONUNCIATION
+            pron_tag = entry.select_one(".PRON")
+            if pron_tag: data["pronunciation"] = pron_tag.text.strip()
+            
+            # Only add if we found a definition
+            if data["definition"]:
+                results.append(data)
+                if len(results) >= 3: break
+        except: pass
+        
+    return results
+    
 # Placeholders for others
 def scrape_oxford(word): return []
 def scrape_collins(word): return []
@@ -757,6 +822,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
