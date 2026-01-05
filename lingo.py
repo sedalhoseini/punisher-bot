@@ -244,18 +244,22 @@ SCRAPER_MAP = {
 def normalize_pos_key(text):
     """Helper to unify POS names (e.g., 'n' vs 'noun') for comparison."""
     if not text: return "unknown"
-    t = text.lower().strip().replace(".", "") # Remove dots (v. -> v)
+    t = text.lower().strip().replace(".", "") # Remove dots
     
-    # 1. Check Adverb FIRST (because 'adverb' contains 'verb')
+    # 1. Adverb (Priority)
     if "adv" in t: return "adverb"
     
-    # 2. Map "Past Participle" to Verb (Treats them as the same category)
-    if "participle" in t: return "verb"
+    # 2. Verb Variants (The Fix for 'Drunk')
+    # Maps 'past participle', 'v', 'verb' all to 'verb'
+    if "verb" in t or t == "v" or "participle" in t: return "verb"
 
-    # 3. Check others
-    if "noun" in t or t == "n": return "noun"
-    if "verb" in t or t == "v": return "verb"
+    # 3. Adjective Variants
     if "adj" in t: return "adjective"
+
+    # 4. Noun Variants
+    if "noun" in t or t == "n": return "noun"
+    
+    # 5. Others
     if "prep" in t: return "preposition"
     if "conj" in t: return "conjunction"
     if "interj" in t: return "interjection"
@@ -275,24 +279,25 @@ def get_words_from_web(word, user_id):
     for source_name in pref_list:
         scraper = SCRAPER_MAP.get(source_name)
         if scraper:
-            # 1. Get results from this specific dictionary
             results = scraper(word)
             
             for item in results:
-                # 2. Check the Part of Speech (POS)
                 raw_pos = item.get("parts", "Unknown")
+                
+                # 🛠 FIX: If POS is missing but def says "past participle", treat as VERB
+                def_lower = item.get("definition", "").lower()
+                if raw_pos == "Unknown" and "past participle" in def_lower:
+                    raw_pos = "verb"
+
                 pos_key = normalize_pos_key(raw_pos)
                 
-                # 3. "Fill the Gap" Logic
-                # If we haven't found this POS yet (from a higher priority source), ADD IT.
                 if pos_key not in seen_pos:
                     combined_results.append(item)
-                    
-                    # Mark this POS as "Found" so lower priority dictionaries don't overwrite it
                     if pos_key != "unknown":
                         seen_pos.add(pos_key)
                         
     return combined_results
+    
 # ================= AI =================
 def ai_generate_full_words_list(word: str):
     prompt = f"""
@@ -955,6 +960,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
