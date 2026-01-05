@@ -244,16 +244,23 @@ SCRAPER_MAP = {
 def normalize_pos_key(text):
     """Helper to unify POS names (e.g., 'n' vs 'noun') for comparison."""
     if not text: return "unknown"
-    t = text.lower().strip()
+    t = text.lower().strip().replace(".", "") # Remove dots (v. -> v)
     
-    # 1. Check Adverb FIRST (because 'adverb' contains the word 'verb')
-    if "adv" in t: return "adverb" 
+    # 1. Check Adverb FIRST (because 'adverb' contains 'verb')
+    if "adv" in t: return "adverb"
     
-    # 2. Then check others
+    # 2. Map "Past Participle" to Verb (Treats them as the same category)
+    if "participle" in t: return "verb"
+
+    # 3. Check others
     if "noun" in t or t == "n": return "noun"
     if "verb" in t or t == "v": return "verb"
     if "adj" in t: return "adjective"
     if "prep" in t: return "preposition"
+    if "conj" in t: return "conjunction"
+    if "interj" in t: return "interjection"
+    if "pron" in t: return "pronoun"
+    
     return t
 
 def get_words_from_web(word, user_id):
@@ -948,6 +955,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
