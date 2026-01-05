@@ -509,39 +509,50 @@ async def search_choice(update, context):
 
 async def search_perform(update, context):
     query = update.message.text.strip()
-    # Fix: Check if search_type exists. If not, reset to main menu.
     stype = context.user_data.get("search_type")
     
+    # 1. Safety Check (Fixes the crash from logs)
     if query == "🏠 Cancel": return await common_cancel(update, context)
-    if not stype: 
+    if not stype:
         await update.message.reply_text("⚠️ Session expired. Please choose search type again.")
         return await search_choice(update, context)
 
     sql = ""
-    if stype == "By Word": 
-        sql = "SELECT * FROM words WHERE word LIKE ?"
-        # Try strict match first for "By Word" to show Full Card
-        with db() as c: rows = c.execute(sql, (f"%{query}%",)).fetchall()
+    params = ()
+
+    if stype == "By Word":
+        # 2. STRICT SEARCH LOGIC
+        # Finds "run" OR "run (Verb)"
+        # Does NOT find "drunk" or "runner"
+        sql = "SELECT * FROM words WHERE lower(word) = ? OR lower(word) LIKE ?"
+        q_lower = query.lower()
+        params = (q_lower, f"{q_lower} (%")
+        
+        with db() as c: rows = c.execute(sql, params).fetchall()
         
         if not rows:
-            # 4. Not Found -> Add Option
+            # Not found -> Offer to Add
             context.user_data["add_preload"] = query
             await update.message.reply_text(
                 f"❌ '{query}' not found.\nDo you want to add it?",
                 reply_markup=ReplyKeyboardMarkup([["Yes, AI Add"], ["Yes, Manual Add"], ["🏠 Cancel"]], resize_keyboard=True)
             )
-            return SEARCH_QUERY # Reuse state to catch Yes/No
+            return SEARCH_QUERY 
             
-        # 7. Same Format as Get Word
+        # Found -> Show results
         for row in rows:
             await send_word(update.message, row)
         return await common_cancel(update, context)
 
-    # By Level / Topic -> Show List
-    elif stype == "By Level": sql = "SELECT * FROM words WHERE level LIKE ?"
-    elif stype == "By Topic": sql = "SELECT * FROM words WHERE topic LIKE ?"
+    # 3. Handle other search types (Keep strict exact matches for these too if you want)
+    elif stype == "By Level": 
+        sql = "SELECT * FROM words WHERE level = ?" # changed to exact match (=)
+        params = (query,)
+    elif stype == "By Topic": 
+        sql = "SELECT * FROM words WHERE topic = ?" # changed to exact match (=)
+        params = (query,)
     
-    with db() as c: rows = c.execute(sql, (f"%{query}%",)).fetchall()
+    with db() as c: rows = c.execute(sql, params).fetchall()
     
     if rows:
         msg = "\n".join(f"{r['word']} ({r['level']})" for r in rows[:40])
@@ -908,6 +919,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
