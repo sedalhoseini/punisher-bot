@@ -900,13 +900,11 @@ async def daily_pos_handler(update, context):
         final_list = context.user_data.get("temp_pos", [])
         context.user_data["daily_pos"] = ",".join(final_list) if final_list else "Any"
         
-        # TRANSITION TO TOPIC (Text Keyboard)
-        # We delete the inline menu to clean up, then send a new text msg
-        await query.delete_message()
-        return await daily_topic_entry(update, context)
+        # TRANSITION TO TOPIC (Smooth: Edit the existing message)
+        return await daily_topic_entry(update, context, edit_mode=True)
 
 # Helper to enter topic state
-async def daily_topic_entry(update, context):
+async def daily_topic_entry(update, context, edit_mode=False):
     # 1. Fetch Topics ONCE and Cache them
     with db() as c: rows = c.execute("SELECT DISTINCT topic FROM words").fetchall()
     topics = [r["topic"] for r in rows] if rows else ["General"]
@@ -920,14 +918,20 @@ async def daily_topic_entry(update, context):
     # Build Checkbox Keyboard
     kb = build_multi_select_keyboard(topics, [], "topic_", cols=2)
     
-    # Send Message
-    chat_id = update.effective_chat.id
-    await context.bot.send_message(
-        chat_id,
-        f"✅ POS: {context.user_data['daily_pos']}\n\n📚 **Select Book(s)/Topic(s):**\nChoose one or more, then click 'Done'.",
-        reply_markup=kb,
-        parse_mode="Markdown"
+    text = (
+        f"✅ POS: {context.user_data.get('daily_pos', 'Any')}\n\n"
+        f"📚 **Select Book(s)/Topic(s):**\n"
+        f"Choose one or more, then click 'Done'."
     )
+    
+    if edit_mode and update.callback_query:
+        # Smooth transition: Edit the previous message
+        await update.callback_query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
+    else:
+        # Fallback: Send new message
+        chat_id = update.effective_chat.id
+        await context.bot.send_message(chat_id, text, reply_markup=kb, parse_mode="Markdown")
+        
     return DAILY_TOPIC
     
 # Step 5 — Topic (Callback Handler) + SAVE
@@ -936,41 +940,51 @@ async def daily_topic_handler(update, context):
     await query.answer()
     data = query.data
 
-    # 1. Use Cached Topics (Instant, No Database Lag)
+    # 1. Use Cached Topics
     all_topics = context.user_data.get("cached_topics", ["General"])
-    
-    # Safety fallback if cache is lost (e.g. bot restart)
-    if not all_topics and "cached_topics" not in context.user_data:
+    # Fallback if cache empty
+    if not all_topics:
          with db() as c: rows = c.execute("SELECT DISTINCT topic FROM words").fetchall()
          all_topics = [r["topic"] for r in rows] if rows else ["General"]
          context.user_data["cached_topics"] = all_topics
 
     current_selected = context.user_data.get("temp_topics", [])
 
+    # === TOGGLE LOGIC ===
     if "toggle_" in data:
         val = data.split("toggle_")[1]
+        
+        # Toggle selection
         if val in current_selected:
             current_selected.remove(val)
         else:
             current_selected.append(val)
+            
         context.user_data["temp_topics"] = current_selected
         
+        # Rebuild keyboard with new checkmarks
         kb = build_multi_select_keyboard(all_topics, current_selected, "topic_", cols=2)
-        await query.edit_message_reply_markup(kb)
+        
+        # Smooth update (Try/Except handles "Message not modified" error if user spams click)
+        try: await query.edit_message_reply_markup(kb)
+        except: pass
         return DAILY_TOPIC
 
+    # === CLEAR / ANY LOGIC ===
     elif "any" in data:
         context.user_data["temp_topics"] = []
         kb = build_multi_select_keyboard(all_topics, [], "topic_", cols=2)
-        await query.edit_message_reply_markup(kb)
+        try: await query.edit_message_reply_markup(kb)
+        except: pass
         return DAILY_TOPIC
 
+    # === DONE LOGIC ===
     elif "done" in data:
         # Save Final Selection
         final_list = context.user_data.get("temp_topics", [])
         final_topic_str = ",".join(final_list) if final_list else "Any"
         
-        # === FINAL SAVE TO DB ===
+        # DB SAVE
         uid = update.effective_user.id
         d = context.user_data
         
@@ -981,16 +995,27 @@ async def daily_topic_handler(update, context):
                 ON CONFLICT(user_id) DO UPDATE SET 
                 daily_enabled=1, daily_count=excluded.daily_count, daily_time=excluded.daily_time, 
                 daily_level=excluded.daily_level, daily_pos=excluded.daily_pos, daily_topic=excluded.daily_topic
-            """, (uid, d["daily_count"], d["daily_time"], d["daily_level"], d["daily_pos"], final_topic_str))
+            """, (uid, d.get("daily_count"), d.get("daily_time"), d.get("daily_level"), d.get("daily_pos"), final_topic_str))
 
-        await query.edit_message_text(
-            f"✅ **Daily Words Active!**\n\n"
-            f"📅 Count: {d['daily_count']}\n"
-            f"⏰ Time: {d['daily_time']}\n"
-            f"📊 Level: {d['daily_level']}\n"
-            f"🏷 POS: {d['daily_pos']}\n"
-            f"📚 Topic: {final_topic_str}",
-            parse_mode="Markdown"
+        # 1. Edit the inline message to show "Saved" state
+        summary_text = (
+            f"✅ **Daily Words Activated!**\n"
+            f"________________________\n"
+            f"📅 Count: `{d.get('daily_count')}`\n"
+            f"⏰ Time: `{d.get('daily_time')}`\n"
+            f"📊 Level: `{d.get('daily_level')}`\n"
+            f"🏷 POS: `{d.get('daily_pos')}`\n"
+            f"📚 Topic: `{final_topic_str}`"
+        )
+        try: await query.edit_message_text(summary_text, parse_mode="Markdown")
+        except: pass
+
+        # 2. SEND NEW MESSAGE with Main Menu (Auto-Exit)
+        is_admin = uid in ADMIN_IDS
+        await context.bot.send_message(
+            chat_id=uid,
+            text="🏠 Returning to Main Menu...",
+            reply_markup=main_keyboard_bottom(is_admin)
         )
         return ConversationHandler.END
 
@@ -1387,6 +1412,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
