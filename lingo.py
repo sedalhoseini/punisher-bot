@@ -822,6 +822,12 @@ def build_multi_select_keyboard(options, selected, callback_prefix, cols=3, has_
     buttons.append(controls)
     return InlineKeyboardMarkup(buttons)
 
+def get_time_keyboard():
+    """Returns a keyboard with only navigation, forcing manual time entry."""
+    return ReplyKeyboardMarkup([
+        ["🔙 Back", "🏠 Cancel"]
+    ], resize_keyboard=True)
+
 # --- Daily ---
 async def daily_count_handler(update, context):
     text = update.message.text
@@ -1535,6 +1541,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
