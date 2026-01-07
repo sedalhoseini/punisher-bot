@@ -1266,7 +1266,15 @@ async def send_daily_scheduler(context):
     tehran = pytz.timezone("Asia/Tehran")
     now_str = datetime.now(tehran).strftime("%H:%M")
     
-    # 1. Run User Query in Background Thread (Non-blocking)
+    # 1. DUPLICATE CHECK: If we already sent words for "09:30", skip this run.
+    last_sent = context.bot_data.get("last_sent_minute")
+    if last_sent == now_str:
+        return 
+    
+    # Save this minute as processed
+    context.bot_data["last_sent_minute"] = now_str
+
+    # 2. Run User Query in Background Thread
     def get_scheduled_users():
         with db() as c: 
             return c.execute("SELECT * FROM users WHERE daily_enabled=1 AND daily_time=?", (now_str,)).fetchall()
@@ -1277,8 +1285,7 @@ async def send_daily_scheduler(context):
         user_id = u["user_id"]
         
         for _ in range(u["daily_count"]):
-            # 2. Run Word Picker in Background Thread (Non-blocking)
-            # pick_word_for_user involves "ORDER BY RANDOM()" which can be slow
+            # 3. Run Word Picker in Background Thread
             word_row = await asyncio.to_thread(pick_word_for_user, user_id)
             
             if word_row:
@@ -1294,7 +1301,7 @@ async def send_daily_scheduler(context):
                     await context.bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown")
                 except: 
                     pass
-
+                    
 # --- PAGINATION SYSTEM ---
 ITEMS_PER_PAGE = 20
 
@@ -1426,7 +1433,7 @@ def main():
     
     tehran = pytz.timezone("Asia/Tehran")
     app.job_queue.run_daily(auto_backup, time=time(0,0,0, tzinfo=tehran))
-    app.job_queue.run_repeating(send_daily_scheduler, interval=60, first=10)
+    app.job_queue.run_repeating(send_daily_scheduler, interval=30, first=10)
 
     conv = ConversationHandler(
         entry_points=[
@@ -1489,6 +1496,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
