@@ -37,7 +37,7 @@ CHANGELOG = "• 📢 Channel Lock\n• 🗓️ Smart Daily (Multi-Source)\n• 
     REPORT_MSG,
     EDIT_CHOOSE, EDIT_VALUE,
     SETTINGS_CHOICE, SETTINGS_PRIORITY 
-) = range(21)
+) = range(22)
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -1029,5 +1029,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
