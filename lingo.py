@@ -23,7 +23,7 @@ CHANGELOG = """
 - More options included
 - Improved memory
 - Improved UI
-- bugs fixed
+- Bugs fixed
 """
 
 # ================= STATES =================
@@ -1541,6 +1541,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
