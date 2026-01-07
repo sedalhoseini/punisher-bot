@@ -14,10 +14,10 @@ from telegram.ext import (
 )
 
 # ================= VERSION INFO =================
-BOT_VERSION = "0.6.0"
-VERSION_DATE = "2026-01-05"
+BOT_VERSION = "0.7.0"
+VERSION_DATE = "2026-01-07"
 CHANGELOG = """
-• New version
+• Daily Words got updated
 """
 
 # ================= STATES =================
@@ -459,16 +459,27 @@ def pick_word_for_user(user_id):
         """
         params = [user_id]
 
-        # Filters
-        if u and u["daily_level"] and u["daily_level"] != "Skip":
-            query += " AND w.level = ?"
-            params.append(u["daily_level"])
+        # FILTER: LEVEL (Multi-Select Support)
+        if u and u["daily_level"] and u["daily_level"] != "Any":
+            levels = u["daily_level"].split(",") # Split "A1,A2" into ['A1', 'A2']
+            placeholders = ",".join("?" * len(levels))
+            query += f" AND w.level IN ({placeholders})"
+            params.extend(levels)
 
-        if u and u["daily_pos"] and u["daily_pos"] != "Skip":
-            query += " AND lower(w.word) LIKE ?"
-            params.append(f"%({u['daily_pos']})%")
+        # FILTER: POS (Multi-Select Support)
+        if u and u["daily_pos"] and u["daily_pos"] != "Any":
+            pos_list = u["daily_pos"].split(",")
+            # POS logic is trickier because of "verb" vs "verbs". We use LIKE OR logic.
+            # (w.word LIKE '%(noun)%' OR w.word LIKE '%(verb)%')
+            or_clauses = []
+            for p in pos_list:
+                or_clauses.append("lower(w.word) LIKE ?")
+                params.append(f"%({p})%")
+            
+            if or_clauses:
+                query += f" AND ({' OR '.join(or_clauses)})"
 
-        # TOPIC FILTER
+        # FILTER: TOPIC
         if u and u["daily_topic"] and u["daily_topic"] != "🌍 All Sources":
             query += " AND w.topic = ?"
             params.append(u["daily_topic"])
@@ -478,6 +489,7 @@ def pick_word_for_user(user_id):
         # 3. Execute & Reset Logic
         row = c.execute(query, params).fetchone()
         if not row:
+            # Reset sent words if all words were already sent
             c.execute("DELETE FROM sent_words WHERE user_id=?", (user_id,))
             row = c.execute(query, params).fetchone()
             if not row: return None
@@ -738,6 +750,33 @@ async def report_handler(update, context):
     await update.message.reply_text("✅ Report sent to admin.")
     return await common_cancel(update, context)
 
+def build_multi_select_keyboard(options, selected, callback_prefix, cols=3):
+    """
+    Generates an inline keyboard with checkmarks.
+    options: List of strings (e.g., ['A1', 'A2'])
+    selected: List of currently selected strings
+    callback_prefix: Prefix for button data (e.g., "lvl_")
+    """
+    buttons = []
+    row = []
+    for opt in options:
+        is_selected = opt in selected
+        text = f"✅ {opt}" if is_selected else opt
+        data = f"{callback_prefix}toggle_{opt}"
+        row.append(InlineKeyboardButton(text, callback_data=data))
+        
+        if len(row) == cols:
+            buttons.append(row)
+            row = []
+    if row: buttons.append(row)
+    
+    # Control Buttons
+    buttons.append([
+        InlineKeyboardButton("🗑 Clear / Any", callback_data=f"{callback_prefix}any"),
+        InlineKeyboardButton("Done ➡️", callback_data=f"{callback_prefix}done")
+    ])
+    return InlineKeyboardMarkup(buttons)
+
 # --- Daily ---
 async def daily_count_handler(update, context):
     text = update.message.text
@@ -758,59 +797,129 @@ async def daily_count_handler(update, context):
         return DAILY_TIME
     except: await update.message.reply_text("Invalid. 1-50:"); return DAILY_COUNT
 
+# Step 2 — Time -> Triggers Level Selection
 async def daily_time_handler(update, context):
     if update.message.text == "🏠 Cancel": return await common_cancel(update, context)
+    
+    time_text = update.message.text.strip()
     try:
-        datetime.strptime(update.message.text.strip(), "%H:%M")
-        context.user_data["daily_time"] = update.message.text.strip()
-        
-        # Updated Keyboard: Added C2 and changed Skip to Any
-        kb = [
-            ["A1", "A2", "B1"],
-            ["B2", "C1", "C2"],
-            ["Any"],
-            ["🏠 Cancel"]
-        ]
-        
-        await update.message.reply_text("Level?", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
-        return DAILY_LEVEL
-    except: 
-        await update.message.reply_text("Invalid Time (HH:MM).")
+        datetime.strptime(time_text, "%H:%M")
+    except:
+        await update.message.reply_text("Invalid Time. Use HH:MM format.")
         return DAILY_TIME
 
-async def daily_level_handler(update, context):
-    if update.message.text == "🏠 Cancel": return await common_cancel(update, context)
-    
-    # Logic change: Check for "Any" instead of "Skip"
-    text = update.message.text
-    context.user_data["daily_level"] = None if text == "Any" else text
-    
-    # Updated Keyboard: More POS options + Any
-    kb = [
-        ["noun", "verb", "adjective"],
-        ["adverb", "phrasal verb", "idiom"],
-        ["Any"],
-        ["🏠 Cancel"]
-    ]
-    
-    await update.message.reply_text("Part of Speech?", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
-    return DAILY_POS
+    context.user_data["daily_time"] = time_text
+    context.user_data["temp_levels"] = [] # Init empty selection
 
+    # Options available
+    opts = ["A1", "A2", "B1", "B2", "C1", "C2"]
+    kb = build_multi_select_keyboard(opts, [], "lvl_")
+    
+    await update.message.reply_text(
+        "📊 **Select Level(s):**\nChoose one or more. Click 'Done' when finished.",
+        reply_markup=kb, parse_mode="Markdown"
+    )
+    return DAILY_LEVEL
+
+# Step 3 — Level (Callback Handler)
+async def daily_level_handler(update, context):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    
+    current_selected = context.user_data.get("temp_levels", [])
+    opts = ["A1", "A2", "B1", "B2", "C1", "C2"]
+
+    if "toggle_" in data:
+        val = data.split("toggle_")[1]
+        if val in current_selected:
+            current_selected.remove(val)
+        else:
+            current_selected.append(val)
+        context.user_data["temp_levels"] = current_selected
+        
+        # Refresh Keyboard
+        kb = build_multi_select_keyboard(opts, current_selected, "lvl_")
+        await query.edit_message_reply_markup(kb)
+        return DAILY_LEVEL
+
+    elif "any" in data:
+        context.user_data["temp_levels"] = []
+        kb = build_multi_select_keyboard(opts, [], "lvl_")
+        await query.edit_message_reply_markup(kb)
+        return DAILY_LEVEL
+
+    elif "done" in data:
+        # Save Final Selection
+        final_list = context.user_data.get("temp_levels", [])
+        context.user_data["daily_level"] = ",".join(final_list) if final_list else "Any"
+
+        # MOVE TO POS SELECTION
+        context.user_data["temp_pos"] = []
+        pos_opts = ["noun", "verb", "adjective", "adverb", "idiom", "phrasal verb"]
+        kb = build_multi_select_keyboard(pos_opts, [], "pos_")
+        
+        await query.edit_message_text(
+            f"✅ Level: {context.user_data['daily_level']}\n\n🏷 **Select Part(s) of Speech:**",
+            reply_markup=kb, parse_mode="Markdown"
+        )
+        return DAILY_POS
+
+# Step 4 — POS (Callback Handler)
 async def daily_pos_handler(update, context):
-    if update.message.text == "🏠 Cancel": return await common_cancel(update, context)
-    
-    # Logic change: Check for "Any" instead of "Skip"
-    text = update.message.text
-    context.user_data["daily_pos"] = None if text == "Any" else text
-    
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    current_selected = context.user_data.get("temp_pos", [])
+    opts = ["noun", "verb", "adjective", "adverb", "idiom", "phrasal verb"]
+
+    if "toggle_" in data:
+        val = data.split("toggle_")[1]
+        if val in current_selected:
+            current_selected.remove(val)
+        else:
+            current_selected.append(val)
+        context.user_data["temp_pos"] = current_selected
+        
+        kb = build_multi_select_keyboard(opts, current_selected, "pos_")
+        await query.edit_message_reply_markup(kb)
+        return DAILY_POS
+
+    elif "any" in data:
+        context.user_data["temp_pos"] = []
+        kb = build_multi_select_keyboard(opts, [], "pos_")
+        await query.edit_message_reply_markup(kb)
+        return DAILY_POS
+
+    elif "done" in data:
+        # Save Final Selection
+        final_list = context.user_data.get("temp_pos", [])
+        context.user_data["daily_pos"] = ",".join(final_list) if final_list else "Any"
+        
+        # TRANSITION TO TOPIC (Text Keyboard)
+        # We delete the inline menu to clean up, then send a new text msg
+        await query.delete_message()
+        return await daily_topic_entry(update, context)
+
+# Helper to enter topic state
+async def daily_topic_entry(update, context):
     # Fetch Topics
     with db() as c: rows = c.execute("SELECT DISTINCT topic FROM words").fetchall()
     topics = [r["topic"] for r in rows] if rows else ["General"]
     
     buttons = [["🌍 All Sources"]] + [topics[i:i + 2] for i in range(0, len(topics), 2)] + [["🏠 Cancel"]]
-    await update.message.reply_text("📚 Which Book/Topic?", reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True))
+    
+    # We use context.bot.send_message because we might come from a callback
+    chat_id = update.effective_chat.id
+    await context.bot.send_message(
+        chat_id,
+        f"✅ POS: {context.user_data['daily_pos']}\n\n📚 **Which Book/Topic?**",
+        reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True),
+        parse_mode="Markdown"
+    )
     return DAILY_TOPIC
-
+    
 async def daily_topic_handler(update, context):
     if update.message.text == "🏠 Cancel": return await common_cancel(update, context)
     context.user_data["daily_topic"] = update.message.text
@@ -1182,8 +1291,8 @@ def main():
 
             DAILY_COUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, daily_count_handler)],
             DAILY_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, daily_time_handler)],
-            DAILY_LEVEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, daily_level_handler)],
-            DAILY_POS: [MessageHandler(filters.TEXT & ~filters.COMMAND, daily_pos_handler)],
+            DAILY_LEVEL: [CallbackQueryHandler(daily_level_handler)],
+            DAILY_POS: [CallbackQueryHandler(daily_pos_handler)],
             DAILY_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, daily_topic_handler)],
 
             # LIST LOGIC
@@ -1223,6 +1332,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
