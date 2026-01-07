@@ -516,10 +516,23 @@ async def main_menu_handler(update, context):
         with db() as c: u = c.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
         status_msg = "❌ *Disabled*"
         kb_opts = [["🏠 Cancel"]]
+        
         if u and u["daily_enabled"]: 
-            status_msg = f"✅ *Active*\n📅 {u['daily_count']} words at {u['daily_time']}"
-            kb_opts = [["🔕 Deactivate"], ["🏠 Cancel"]] # Add Deactivate button
-        await update.message.reply_text(f"{status_msg}\n\nTo change, enter count (1-50):", reply_markup=ReplyKeyboardMarkup(kb_opts, resize_keyboard=True), parse_mode="Markdown")
+            # Get topic, default to "All Sources" if None
+            topic_display = u['daily_topic'] if u['daily_topic'] else "🌍 All Sources"
+            
+            status_msg = (
+                f"✅ *Active*\n"
+                f"📅 {u['daily_count']} words at {u['daily_time']}\n"
+                f"📚 Book: {topic_display}"
+            )
+            kb_opts = [["🔕 Deactivate"], ["🏠 Cancel"]]
+
+        await update.message.reply_text(
+            f"{status_msg}\n\nTo change, enter count (1-50):", 
+            reply_markup=ReplyKeyboardMarkup(kb_opts, resize_keyboard=True), 
+            parse_mode="Markdown"
+        )
         return DAILY_COUNT
     if text == "📚 List Words":
         # 1. Fetch Topics
@@ -750,19 +763,45 @@ async def daily_time_handler(update, context):
     try:
         datetime.strptime(update.message.text.strip(), "%H:%M")
         context.user_data["daily_time"] = update.message.text.strip()
-        await update.message.reply_text("Level?", reply_markup=ReplyKeyboardMarkup([["A1","A2","B1"],["B2","C1"],["Skip"],["🏠 Cancel"]], resize_keyboard=True))
+        
+        # Updated Keyboard: Added C2 and changed Skip to Any
+        kb = [
+            ["A1", "A2", "B1"],
+            ["B2", "C1", "C2"],
+            ["Any"],
+            ["🏠 Cancel"]
+        ]
+        
+        await update.message.reply_text("Level?", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
         return DAILY_LEVEL
-    except: await update.message.reply_text("Invalid Time (HH:MM)."); return DAILY_TIME
+    except: 
+        await update.message.reply_text("Invalid Time (HH:MM).")
+        return DAILY_TIME
 
 async def daily_level_handler(update, context):
     if update.message.text == "🏠 Cancel": return await common_cancel(update, context)
-    context.user_data["daily_level"] = None if update.message.text == "Skip" else update.message.text
-    await update.message.reply_text("POS?", reply_markup=ReplyKeyboardMarkup([["noun","verb"],["adjective"],["Skip"],["🏠 Cancel"]], resize_keyboard=True))
+    
+    # Logic change: Check for "Any" instead of "Skip"
+    text = update.message.text
+    context.user_data["daily_level"] = None if text == "Any" else text
+    
+    # Updated Keyboard: More POS options + Any
+    kb = [
+        ["noun", "verb", "adjective"],
+        ["adverb", "phrasal verb", "idiom"],
+        ["Any"],
+        ["🏠 Cancel"]
+    ]
+    
+    await update.message.reply_text("Part of Speech?", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
     return DAILY_POS
 
 async def daily_pos_handler(update, context):
     if update.message.text == "🏠 Cancel": return await common_cancel(update, context)
-    context.user_data["daily_pos"] = None if update.message.text == "Skip" else update.message.text
+    
+    # Logic change: Check for "Any" instead of "Skip"
+    text = update.message.text
+    context.user_data["daily_pos"] = None if text == "Any" else text
     
     # Fetch Topics
     with db() as c: rows = c.execute("SELECT DISTINCT topic FROM words").fetchall()
@@ -1184,6 +1223,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
