@@ -855,18 +855,19 @@ async def daily_time_handler(update, context):
     opts = ["A1", "A2", "B1", "B2", "C1", "C2"]
     kb = build_multi_select_keyboard(opts, [], "lvl_")
     
-    # 1. Clean up the "Back" keyboard from the user's screen
-    await update.message.reply_text("_Processing..._", reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
-    
-    # 2. Send the "Status Board" message
-    # This message will be EDITED in the next steps, not sent again.
-    await update.message.reply_text(
+    # 1. Send the Status Message with ReplyKeyboardRemove 
+    # (This clears the old 'Back/Cancel' buttons from the bottom of the screen)
+    msg = await update.message.reply_text(
         f"✅ Time: `{formatted_time}`\n\n"
         f"📊 **Select Level(s):**\n"
         f"Choose one or more, then click 'Done'.",
-        reply_markup=kb,
+        reply_markup=ReplyKeyboardRemove(),
         parse_mode="Markdown"
     )
+    
+    # 2. Immediately attach the Inline Buttons to the SAME message
+    # (This makes it appear as one smooth action)
+    await msg.edit_reply_markup(reply_markup=kb)
     
     return DAILY_LEVEL
 
@@ -1487,6 +1488,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
