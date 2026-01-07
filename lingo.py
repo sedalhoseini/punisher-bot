@@ -18,7 +18,10 @@ from telegram.ext import (
 BOT_VERSION = "0.7.0"
 VERSION_DATE = "2026-01-07"
 CHANGELOG = """
-• Daily Words got updated
+• Daily Words got updated:
+- No repeated words anymore
+- Improved interface
+- bugs fixed
 """
 
 # ================= STATES =================
@@ -453,51 +456,73 @@ def pick_word_for_user(user_id):
         # 1. Get User Preferences
         u = c.execute("SELECT daily_level, daily_pos, daily_topic FROM users WHERE user_id=?", (user_id,)).fetchone()
         
-        # 2. Build Query
-        query = """
-            SELECT w.* FROM words w
-            LEFT JOIN sent_words s ON w.id = s.word_id AND s.user_id = ?
-            WHERE s.word_id IS NULL
-        """
-        params = [user_id]
+        # 2. Build Filter Constraints (to be used for both fetching and resetting)
+        constraints = []
+        params = []
 
-        # FILTER: LEVEL (Multi-Select Support)
+        # FILTER: LEVEL
         if u and u["daily_level"] and u["daily_level"] != "Any":
-            levels = u["daily_level"].split(",") # Split "A1,A2" into ['A1', 'A2']
+            levels = u["daily_level"].split(",") 
             placeholders = ",".join("?" * len(levels))
-            query += f" AND w.level IN ({placeholders})"
+            constraints.append(f"w.level IN ({placeholders})")
             params.extend(levels)
 
-        # FILTER: POS (Multi-Select Support)
+        # FILTER: POS
         if u and u["daily_pos"] and u["daily_pos"] != "Any":
             pos_list = u["daily_pos"].split(",")
-            # POS logic is trickier because of "verb" vs "verbs". We use LIKE OR logic.
-            # (w.word LIKE '%(noun)%' OR w.word LIKE '%(verb)%')
             or_clauses = []
             for p in pos_list:
                 or_clauses.append("lower(w.word) LIKE ?")
                 params.append(f"%({p})%")
-            
             if or_clauses:
-                query += f" AND ({' OR '.join(or_clauses)})"
+                constraints.append(f"({' OR '.join(or_clauses)})")
 
-        # FILTER: TOPIC (Multi-Select Support)
+        # FILTER: TOPIC
         if u and u["daily_topic"] and u["daily_topic"] != "🌍 All Sources" and u["daily_topic"] != "Any":
             topics = u["daily_topic"].split(",")
             placeholders = ",".join("?" * len(topics))
-            query += f" AND w.topic IN ({placeholders})"
+            constraints.append(f"w.topic IN ({placeholders})")
             params.extend(topics)
 
-        query += " ORDER BY RANDOM() LIMIT 1"
+        # Combine constraints
+        where_clause = " AND ".join(constraints) if constraints else "1=1"
 
-        # 3. Execute & Reset Logic
-        row = c.execute(query, params).fetchone()
+        # 3. Try to fetch an UNSEEN word
+        # We assume sent_words (s) matches, so s.word_id IS NULL means "not seen"
+        query = f"""
+            SELECT w.* FROM words w
+            LEFT JOIN sent_words s ON w.id = s.word_id AND s.user_id = ?
+            WHERE s.word_id IS NULL AND {where_clause}
+            ORDER BY RANDOM() LIMIT 1
+        """
+        
+        # Params: user_id first (for the JOIN), then the filter params
+        full_params = [user_id] + params
+        
+        row = c.execute(query, full_params).fetchone()
+
+        # 4. If NO word found, RESET history for THESE SPECIFIC FILTERS only
         if not row:
-            # Reset sent words if all words were already sent
-            c.execute("DELETE FROM sent_words WHERE user_id=?", (user_id,))
-            row = c.execute(query, params).fetchone()
+            # "Smart Reset": Only delete history for words that match the current Level/POS/Topic
+            # This prevents losing history for OTHER levels/topics.
+            delete_sql = f"""
+                DELETE FROM sent_words 
+                WHERE user_id = ? 
+                AND word_id IN (
+                    SELECT id FROM words w WHERE {where_clause}
+                )
+            """
+            # Params: user_id (for delete) + filter params (for subquery)
+            delete_params = [user_id] + params
+            c.execute(delete_sql, delete_params)
+            
+            # Retry fetching after reset
+            row = c.execute(query, full_params).fetchone()
+            
+            # If still no row, database might be empty for these filters
             if not row: return None
 
+        # 5. Mark word as seen
         c.execute("INSERT OR IGNORE INTO sent_words (user_id, word_id) VALUES (?,?)", (user_id, row["id"]))
         return row
 
@@ -1496,6 +1521,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
