@@ -934,7 +934,7 @@ async def daily_topic_entry(update, context, edit_mode=False):
     
     text = (
         f"✅ POS: {context.user_data.get('daily_pos', 'Any')}\n\n"
-        f"📚 **Select Book(s)/Topic(s):**\n"
+        f"📚 **Select Book(s) / Topic(s):**\n"
         f"Choose one or more, then click 'Done'."
     )
     
@@ -1428,6 +1428,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
