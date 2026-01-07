@@ -578,7 +578,11 @@ async def main_menu_handler(update, context):
             await update.message.reply_text("Cleared.")
         if text == "🛡 Backup": await auto_backup(context)
 
-    await update.message.reply_text("Main Menu:", reply_markup=main_keyboard_bottom(is_admin))
+    # 1. If it's a Private Chat, show the menu to help the user.
+    if update.effective_chat.type == "private":
+        await update.message.reply_text("Main Menu:", reply_markup=main_keyboard_bottom(is_admin))
+    
+    # 2. If it's a Group, DO NOTHING (ignore the message).
     return ConversationHandler.END
 
 # --- Search ---
@@ -1415,6 +1419,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
